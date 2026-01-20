@@ -143,6 +143,27 @@ done
 CLI_UPLOAD_CLOUD=$(normalize_yes_no "$CLI_UPLOAD_CLOUD")
 CLI_SHUTDOWN_INSTANCE=$(normalize_yes_no "$CLI_SHUTDOWN_INSTANCE")
 
+is_vast_instance() {
+  if [[ -n "${CONTAINER_ID:-}" || -n "${VAST_CONTAINER_ID:-}" || -n "${VAST_TCP_PORT_8080:-}" || -n "${PUBLIC_IPADDR:-}" ]]; then
+    return 0
+  fi
+  return 1
+}
+
+VAST_INSTANCE=0
+if is_vast_instance; then
+  VAST_INSTANCE=1
+else
+  if [[ "${CLI_UPLOAD_CLOUD:-}" =~ ^[Yy]$ ]]; then
+    echo "Cloud uploads are only available on Vast.ai instances. Disabling upload." >&2
+  fi
+  if [[ "${CLI_SHUTDOWN_INSTANCE:-}" =~ ^[Yy]$ ]]; then
+    echo "Auto-shutdown is only available on Vast.ai instances. Disabling shutdown." >&2
+  fi
+  CLI_UPLOAD_CLOUD="N"
+  CLI_SHUTDOWN_INSTANCE="N"
+fi
+
 require() {
   if [[ ! -f "$1" ]]; then
     echo "Missing required file: $1" >&2
@@ -378,6 +399,10 @@ check_cloud_configured() {
   # Check if Vast.ai cloud connections are configured
   CLOUD_PERMISSION_DENIED=0
   CLOUD_CONNECTION_MESSAGE=""
+  if (( ! VAST_INSTANCE )); then
+    CLOUD_CONNECTION_MESSAGE="Cloud uploads are available only on Vast.ai instances."
+    return 1
+  fi
   if ! command -v vastai >/dev/null 2>&1; then
     echo "vastai CLI not found. Try: pip install vastai --user --break-system-packages" >&2
     CLOUD_CONNECTION_MESSAGE="vastai CLI not found. Install it with: pip install vastai --user --break-system-packages"
@@ -407,6 +432,10 @@ check_cloud_configured() {
 
 setup_vast_api_key() {
   # Set up Vast.ai API key for instance management
+  if (( ! VAST_INSTANCE )); then
+    echo "Warning: Not running on Vast.ai. Instance shutdown is unavailable." >&2
+    return 1
+  fi
   if [[ -z "${CONTAINER_ID:-}" ]]; then
     echo "Warning: CONTAINER_ID not found. Cannot set up instance shutdown." >&2
     return 1
@@ -444,6 +473,11 @@ setup_vast_api_key() {
 upload_to_cloud() {
   local lora_path="$1"
   local lora_name="$2"
+
+  if (( ! VAST_INSTANCE )); then
+    echo "Cloud uploads are only available on Vast.ai instances. Skipping upload." >&2
+    return 1
+  fi
   
   if ! check_cloud_configured; then
     echo "No cloud connections configured in Vast.ai. Skipping upload." >&2
@@ -478,6 +512,10 @@ upload_to_cloud() {
 }
 
 shutdown_instance() {
+  if (( ! VAST_INSTANCE )); then
+    echo "Auto-shutdown is only available on Vast.ai instances. Skipping." >&2
+    return 1
+  fi
   if [[ -z "${CONTAINER_ID:-}" ]]; then
     echo "Warning: CONTAINER_ID not found. Cannot shutdown instance." >&2
     return 1
@@ -761,12 +799,16 @@ main() {
         UPLOAD_CLOUD="N"
       else
         echo "$CLOUD_CONNECTION_MESSAGE"
-        if (( AUTO_CONFIRM )); then
-          UPLOAD_CLOUD="Y"
-          echo "Upload LoRAs to cloud storage after training? [auto default: $UPLOAD_CLOUD]"
+        if (( ! VAST_INSTANCE )); then
+          UPLOAD_CLOUD="N"
         else
-          read -r -p "Upload LoRAs to cloud storage after training? [Y/n]: " UPLOAD_CLOUD || true
-          UPLOAD_CLOUD=${UPLOAD_CLOUD:-Y}
+          if (( AUTO_CONFIRM )); then
+            UPLOAD_CLOUD="Y"
+            echo "Upload LoRAs to cloud storage after training? [auto default: $UPLOAD_CLOUD]"
+          else
+            read -r -p "Upload LoRAs to cloud storage after training? [Y/n]: " UPLOAD_CLOUD || true
+            UPLOAD_CLOUD=${UPLOAD_CLOUD:-Y}
+          fi
         fi
       fi
     fi
@@ -778,7 +820,10 @@ main() {
     SHUTDOWN_INSTANCE="$CLI_SHUTDOWN_INSTANCE"
     echo "Shut down this instance after training? [auto: $SHUTDOWN_INSTANCE]"
   else
-    if [[ -n "${CONTAINER_ID:-}" ]] && command -v vastai >/dev/null 2>&1; then
+    if (( ! VAST_INSTANCE )); then
+      echo "Auto-shutdown is only available on Vast.ai instances."
+      SHUTDOWN_INSTANCE="N"
+    elif [[ -n "${CONTAINER_ID:-}" ]] && command -v vastai >/dev/null 2>&1; then
       echo "Vast.ai instance management available."
       if (( AUTO_CONFIRM )); then
         SHUTDOWN_INSTANCE="Y"
@@ -789,13 +834,7 @@ main() {
       fi
     else
       echo "Vast.ai CLI not available or not running on Vast.ai instance."
-      if (( AUTO_CONFIRM )); then
-        SHUTDOWN_INSTANCE="Y"
-        echo "Shut down this instance after training to save costs? [auto default: $SHUTDOWN_INSTANCE]"
-      else
-        read -r -p "Shut down this instance after training to save costs? [Y/n]: " SHUTDOWN_INSTANCE || true
-        SHUTDOWN_INSTANCE=${SHUTDOWN_INSTANCE:-Y}
-      fi
+      SHUTDOWN_INSTANCE="N"
     fi
   fi
 

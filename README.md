@@ -27,6 +27,25 @@ Once the instance is running (wait a few minutes for the startup script to finis
 2.  Select **"wan-training-webui"** from the portal menu.
 3.  The UI will open in your browser.
 
+## Local Installation (Non-Vast.ai)
+
+You can run the WebUI locally if you have the required hardware and storage. Cloud uploads and auto-shutdown are Vast.ai-only features, so they are automatically disabled in local mode.
+
+1.  Clone this repository and run the local installer:
+
+    ```bash
+    ./local_install.sh
+    ```
+
+2.  Start the WebUI:
+
+    ```bash
+    source .venv/bin/activate
+    uvicorn webui.server:app --host 0.0.0.0 --port 7865
+    ```
+
+> **Note:** The installer creates `/workspace` paths used by the training scripts (`/workspace/musubi-tuner` and `/workspace/wan-training-webui`). If `/workspace` does not exist, run the script with sudo or create the directory manually.
+
 ## Features
 
 - **Drag-and-Drop Dataset Manager:** Upload images, videos, and caption files directly from your browser.

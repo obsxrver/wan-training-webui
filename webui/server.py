@@ -71,6 +71,7 @@ AUTH_QUERY_PARAM = "token"
 AUTH_COOKIE_MAX_AGE = 60 * 60 * 24 * 30  # 30 days
 PUBLIC_IP_ENV_VAR = "PUBLIC_IPADDR"
 JUPYTER_PORT_ENV_VAR = "VAST_TCP_PORT_8080"
+VAST_ENV_VARS = ("CONTAINER_ID", "VAST_CONTAINER_ID", "VAST_TCP_PORT_8080", "PUBLIC_IPADDR")
 
 
 def _load_auth_token() -> str:
@@ -86,6 +87,10 @@ def _load_auth_token() -> str:
 
 
 AUTH_TOKEN = _load_auth_token()
+
+
+def is_vast_instance() -> bool:
+    return any(os.environ.get(var) for var in VAST_ENV_VARS)
 
 
 def _build_jupyter_base_url() -> Optional[str]:
@@ -272,11 +277,25 @@ def build_snapshot() -> Dict:
 
 
 async def gather_cloud_status() -> Dict[str, Any]:
+    vast_instance = is_vast_instance()
     cli_available = shutil.which("vastai") is not None
     api_key_configured = is_api_key_configured()
 
+    if not vast_instance:
+        return {
+            "is_vast_instance": False,
+            "cli_available": cli_available,
+            "api_key_configured": api_key_configured,
+            "permission_error": False,
+            "has_connections": False,
+            "can_upload": False,
+            "message": "Cloud uploads are available only on Vast.ai instances.",
+            "connections": [],
+        }
+
     if not cli_available:
         return {
+            "is_vast_instance": vast_instance,
             "cli_available": False,
             "api_key_configured": api_key_configured,
             "permission_error": False,
@@ -297,6 +316,7 @@ async def gather_cloud_status() -> Dict[str, Any]:
         stdout_bytes, stderr_bytes = await process.communicate()
     except FileNotFoundError:
         return {
+            "is_vast_instance": vast_instance,
             "cli_available": False,
             "api_key_configured": api_key_configured,
             "permission_error": False,
@@ -333,6 +353,7 @@ async def gather_cloud_status() -> Dict[str, Any]:
         message = "Cloud uploads are ready to use."
 
     return {
+        "is_vast_instance": vast_instance,
         "cli_available": cli_available,
         "api_key_configured": api_key_configured,
         "permission_error": permission_error,
@@ -1288,6 +1309,11 @@ async def set_vast_api_key(payload: ApiKeyRequest) -> Dict[str, Any]:
     api_key = payload.api_key.strip()
     if not api_key:
         raise HTTPException(status_code=400, detail="API key is required.")
+    if not is_vast_instance():
+        raise HTTPException(
+            status_code=403,
+            detail="Vast.ai API keys can only be configured on a Vast.ai instance.",
+        )
     if shutil.which("vastai") is None:
         raise HTTPException(status_code=500, detail="vastai CLI is not installed on this instance.")
 
@@ -1508,13 +1534,25 @@ async def start_training(payload: TrainRequest) -> Dict:
             await event_manager.publish({"type": "log", "line": error_message})
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    cloud_status = await gather_cloud_status()
-    if payload.upload_cloud and not cloud_status.get("can_upload", False):
-        payload.upload_cloud = False
-        reason = cloud_status.get("message") or "Cloud uploads are not available."
-        note = f"Cloud uploads disabled: {reason}"
-        training_state.append_log(note)
-        await event_manager.publish({"type": "log", "line": note})
+    if not is_vast_instance():
+        if payload.upload_cloud:
+            payload.upload_cloud = False
+            note = "Cloud uploads disabled: running in local mode."
+            training_state.append_log(note)
+            await event_manager.publish({"type": "log", "line": note})
+        if payload.shutdown_instance:
+            payload.shutdown_instance = False
+            note = "Auto-shutdown disabled: running in local mode."
+            training_state.append_log(note)
+            await event_manager.publish({"type": "log", "line": note})
+    else:
+        cloud_status = await gather_cloud_status()
+        if payload.upload_cloud and not cloud_status.get("can_upload", False):
+            payload.upload_cloud = False
+            reason = cloud_status.get("message") or "Cloud uploads are not available."
+            note = f"Cloud uploads disabled: {reason}"
+            training_state.append_log(note)
+            await event_manager.publish({"type": "log", "line": note})
 
     noise_mode = payload.noise_mode
     if noise_mode == "high":
