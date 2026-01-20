@@ -654,6 +654,10 @@
         pointer-events: none;
       }
 
+      .is-hidden {
+        display: none;
+      }
+
       button {
         border: none;
         border-radius: 999px;
@@ -951,11 +955,11 @@
             </label>
           </div>
           <div class="form-row two-col">
-            <label class="toggle">
+            <label class="toggle" id="uploadCloudToggle">
               <input type="checkbox" name="uploadCloud" checked />
               Upload LoRAs to cloud storage after training
             </label>
-            <label class="toggle">
+            <label class="toggle" id="shutdownToggle">
               <input type="checkbox" name="shutdownInstance" checked />
               Shut down instance after training
             </label>
@@ -967,7 +971,7 @@
             </label>
           </div>
           <div id="cloudStatusMessage" class="status-note" aria-live="polite"></div>
-          <div class="form-row">
+          <div class="form-row" id="vastApiSection">
             <label>
               Vast.ai API key for cloud uploads
               <span class="status-note"
@@ -1070,7 +1074,10 @@
       const liveProgressHeading = document.getElementById('liveProgressHeading');
       const uploadCloudCheckbox = form.querySelector('input[name="uploadCloud"]');
       const uploadCloudLabel = uploadCloudCheckbox ? uploadCloudCheckbox.closest('.toggle') : null;
+      const shutdownCheckbox = form.querySelector('input[name="shutdownInstance"]');
+      const shutdownLabel = shutdownCheckbox ? shutdownCheckbox.closest('.toggle') : null;
       const cloudStatusMessageEl = document.getElementById('cloudStatusMessage');
+      const vastApiSection = document.getElementById('vastApiSection');
       const apiKeyInput = document.getElementById('vastApiKeyInput');
       const apiKeyButton = document.getElementById('saveApiKeyButton');
       const apiKeyMessageEl = document.getElementById('apiKeyMessage');
@@ -1998,8 +2005,11 @@
 
       function setCloudStatusUI(status) {
         currentCloudStatus = status || null;
+        const isVastInstance = status?.is_vast_instance !== false;
         if (cloudStatusMessageEl) {
-          const message = status?.message || '';
+          const message =
+            status?.message ||
+            (isVastInstance ? '' : 'Cloud uploads and auto-shutdown are available only on Vast.ai instances.');
           cloudStatusMessageEl.textContent = message;
           if (!status) {
             cloudStatusMessageEl.style.color = 'var(--muted)';
@@ -2012,20 +2022,33 @@
           }
         }
 
-        if (!uploadCloudCheckbox) {
-          return;
+        if (uploadCloudCheckbox) {
+          const disableCheckbox = !isVastInstance || !status || status.permission_error || !status.cli_available;
+          uploadCloudCheckbox.disabled = disableCheckbox;
+          if (disableCheckbox) {
+            uploadCloudCheckbox.checked = false;
+          } else if (status && !status.has_connections) {
+            uploadCloudCheckbox.checked = false;
+          }
+
+          if (uploadCloudLabel) {
+            uploadCloudLabel.classList.toggle('disabled', disableCheckbox);
+          }
         }
 
-        const disableCheckbox = !status || status.permission_error || !status.cli_available;
-        uploadCloudCheckbox.disabled = disableCheckbox;
-        if (disableCheckbox) {
-          uploadCloudCheckbox.checked = false;
-        } else if (status && !status.has_connections) {
-          uploadCloudCheckbox.checked = false;
+        if (shutdownCheckbox) {
+          shutdownCheckbox.disabled = !isVastInstance;
+          if (!isVastInstance) {
+            shutdownCheckbox.checked = false;
+          }
         }
 
-        if (uploadCloudLabel) {
-          uploadCloudLabel.classList.toggle('disabled', disableCheckbox);
+        if (shutdownLabel) {
+          shutdownLabel.classList.toggle('disabled', !isVastInstance);
+        }
+
+        if (vastApiSection) {
+          vastApiSection.classList.toggle('is-hidden', !isVastInstance);
         }
       }
 
