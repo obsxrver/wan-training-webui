@@ -673,6 +673,8 @@ main() {
       ;;
   esac
 
+  local TIMESTEP_BOUNDARY
+
   case "$training_mode" in
     t2v)
       TRAIN_TASK="t2v-A14B"
@@ -680,6 +682,7 @@ main() {
       LOW_DIT="$T2V_LOW_DIT"
       HIGH_TITLE="${TITLE_PREFIX}_Wan2.2_high"
       LOW_TITLE="${TITLE_PREFIX}_Wan2.2_low"
+      TIMESTEP_BOUNDARY=875
       ;;
     i2v)
       TRAIN_TASK="i2v-A14B"
@@ -688,6 +691,7 @@ main() {
       HIGH_TITLE="${TITLE_PREFIX}_Wan2.2_high"
       LOW_TITLE="${TITLE_PREFIX}_Wan2.2_low"
       CACHE_LATENTS_ARGS+=(--i2v)
+      TIMESTEP_BOUNDARY=900
       ;;
     *)
       echo "Invalid training mode: $training_mode. Use 't2v' or 'i2v'." >&2
@@ -971,7 +975,7 @@ main() {
       --metadata_title "$HIGH_TITLE" \
       --metadata_author "$AUTHOR" \
       --preserve_distribution_shape \
-      --min_timestep 875 \
+      --min_timestep "$TIMESTEP_BOUNDARY" \
       --max_timestep 1000 \
       > "$PWD/run_high.log" 2>&1 &
     HIGH_PID=$!
@@ -1024,7 +1028,7 @@ main() {
       --metadata_author "$AUTHOR" \
       --preserve_distribution_shape \
       --min_timestep 0 \
-      --max_timestep 875 \
+      --max_timestep "$TIMESTEP_BOUNDARY" \
       > "$PWD/run_low.log" 2>&1 &
     LOW_PID=$!
     WAIT_PIDS+=("$LOW_PID")
