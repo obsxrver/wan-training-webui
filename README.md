@@ -61,7 +61,7 @@ You can run the WebUI locally if you have the required hardware and storage. Clo
 Upload your training data directly in the "Upload dataset files" section.
 - **Media:** `.mp4`, `.mov`, `.png`, `.jpg`, etc.
 - **Captions:** `.txt` files matching the media filenames.
-- *Tip: Use the [SillyCaption](https://obsxrver.pro/SillyCaption) link in the header to auto-generate captions.*
+- *Tip: Use the [SillyCaption](https://obsxrver.com/SillyCaption) link in the header to auto-generate captions.*
 
 ![Dataset Management](media/3_dataset.png)
 
