@@ -6,7 +6,7 @@ A full-featured WebUI for training Wan 2.2 LoRAs on Vast.AI. Supports both Text-
 
 ![Wan 2.2 LoRA Training WebUI](media/1_UI.png)
 
-### Looking for help with captioning? Auto-caption in under a minute with [https://obsxrver.pro/SillyCaption](https://obsxrver.pro/SillyCaption)
+### Looking for help with captioning? Auto-caption in under a minute with [https://obsxrver.com/SillyCaption](https://obsxrver.com/SillyCaption)
 
 ## Quick Start on Vast.ai
 
