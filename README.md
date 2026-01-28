@@ -6,26 +6,24 @@ A full-featured WebUI for training Wan 2.2 LoRAs on Vast.AI. Supports both Text-
 
 ![Wan 2.2 LoRA Training WebUI](media/1_UI.png)
 
-### Looking for help with captioning? Auto-caption in under a minute with [https://obsxrver.com/SillyCaption](https://obsxrver.com/SillyCaption)
+## Setup - Vast.ai
 
-## Quick Start on Vast.ai
+### 1. Template
 
-### 1. Launch via Template
-
-Use the pre-built template to skip manual setup. Please allow about 10-15 minutes for dependency setup and model download.
+Create an account on Vast.AI. Then, use this template. Please allow about 10-15 minutes for dependency installation and model download.
 
 - **Template:** [Wan 2.2 LoRA Training WebUI](https://cloud.vast.ai/?ref_id=208628&creator_id=208628&name=Wan%202.2%20LoRA%20Training%20WebUI)
 
 **Recommended Hardware:**
 - **2x RTX 5090 / 2x H100:** Recommended for concurrent High + Low noise training.
-- **1x RTX 5090 / 1x H100:** Can train one noise level at a time (High or Low).
 
 ### 2. Access the WebUI
 
-Once the instance is running (wait a few minutes for the startup script to finish downloading models. This can take some time, so ***be patient***. Check instance logs for progress):
+
 1.  Click the **"Open"** button on your Vast.AI instance.
-2.  Select **"wan-training-webui"** from the portal menu.
-3.  The UI will open in your browser.
+2.  Wait a few minutes for the startup script to finish running. This can take some time, so ***be patient***. Check the instance logs for progress
+3.  Select **"wan-training-webui"** from the portal menu.
+4.  The UI will open in your browser.
 
 ## Local Installation (Non-Vast.ai)
 
@@ -59,9 +57,9 @@ You can run the WebUI locally if you have the required hardware and storage. Clo
 
 ### 1. Prepare Dataset
 Upload your training data directly in the "Upload dataset files" section.
-- **Media:** `.mp4`, `.mov`, `.png`, `.jpg`, etc.
-- **Captions:** `.txt` files matching the media filenames.
-- *Tip: Use the [SillyCaption](https://obsxrver.com/SillyCaption) link in the header to auto-generate captions.*
+- **Media:** `.mp4`, `.webp`, `.png`, `.jpg`, etc.
+- **Captions:** `.txt` files matching the media filenames (eg `cat.txt` + `cat.png`).
+- *Tip: Use [obsxrver.com/SillyCaption](https://obsxrver.com/SillyCaption) to generate captions.*
 
 ![Dataset Management](media/3_dataset.png)
 
@@ -70,7 +68,7 @@ Set your parameters in the "Configure training" section:
 - **Title & Author:** metadata for your LoRA.
 - **Task:** Choose between Text-to-Video (T2V) or Image-to-Video (I2V).
 - **Noise Schedule:**
-    - **Both (Recommended):** Trains High and Low noise models together (requires 2 GPUs for speed).
+    - **Both (Recommended):** Trains High and Low noise models together (requires 2 GPUs for simultaneous training).
     - **High / Low Only:** Train specific noise levels.
 - **Cloud Upload:** Check this to save results to your Vast.AI cloud storage (requires API key).
 
@@ -111,4 +109,4 @@ If you prefer the terminal, the WebUI runs on top of standard scripts located in
 ## Credits
 - WebUI & Automation by [obsxrver](https://github.com/obsxrver)
 - Training backend based on [musubi-tuner](https://github.com/kohya-ss/musubi-tuner) by the one and only kohya-ss
-- Original workflow guide by [AI_Characters](https://civitai.com/user/AI_Characters)
+- Training parameters from [AI_Characters](https://civitai.com/user/AI_Characters)
