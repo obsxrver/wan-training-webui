@@ -183,13 +183,40 @@ MAX_LOG_LINES = 400
 
 def parse_cloud_connections(output: str) -> List[Dict[str, str]]:
     connections: List[Dict[str, str]] = []
-    for line in output.splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("https://"):
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    json_start = next(
+        (index for index, line in enumerate(lines) if line.startswith("[") or line.startswith("{")),
+        None,
+    )
+    if json_start is not None:
+        json_text = "\n".join(lines[json_start:])
+        try:
+            data = json.loads(json_text)
+        except json.JSONDecodeError:
+            data = None
+        if isinstance(data, dict):
+            data = [data]
+        if isinstance(data, list):
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
+                connection_id = item.get("id")
+                if connection_id is None:
+                    continue
+                name = str(item.get("name") or "").strip()
+                cloud_type = str(item.get("cloud_type") or "").strip()
+                connections.append(
+                    {"id": str(connection_id), "name": name, "cloud_type": cloud_type}
+                )
+            if connections:
+                return connections
+
+    for line in lines:
+        if line.startswith("https://"):
             continue
-        if stripped.lower().startswith("id"):
+        if line.lower().startswith("id"):
             continue
-        parts = stripped.split()
+        parts = line.split()
         if len(parts) < 3 or not parts[0].isdigit():
             continue
         connection_id = parts[0]
@@ -310,6 +337,7 @@ async def gather_cloud_status() -> Dict[str, Any]:
             "vastai",
             "show",
             "connections",
+            "--raw",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -615,6 +643,7 @@ class TrainRequest(BaseModel):
     training_mode: Literal["t2v", "i2v"] = "t2v"
     noise_mode: Literal["both", "high", "low"] = "both"
     convert_videos_to_16fps: bool = False
+    cloud_connection_id: Optional[str] = None
 
 
 class ApiKeyRequest(BaseModel):
@@ -1493,6 +1522,8 @@ def build_command(payload: TrainRequest) -> List[str]:
     args.extend(["--shutdown-instance", "Y" if payload.shutdown_instance else "N"])
     args.extend(["--mode", payload.training_mode])
     args.extend(["--noise-mode", payload.noise_mode])
+    if payload.cloud_connection_id:
+        args.extend(["--cloud-connection-id", payload.cloud_connection_id])
     if payload.auto_confirm:
         args.append("--auto-confirm")
     return args
@@ -1553,6 +1584,20 @@ async def start_training(payload: TrainRequest) -> Dict:
             note = f"Cloud uploads disabled: {reason}"
             training_state.append_log(note)
             await event_manager.publish({"type": "log", "line": note})
+        if payload.cloud_connection_id:
+            available_connections = {
+                connection.get("id")
+                for connection in cloud_status.get("connections") or []
+                if connection.get("id")
+            }
+            if available_connections and payload.cloud_connection_id not in available_connections:
+                note = (
+                    "Selected cloud connection not found in Vast.ai. "
+                    "Falling back to the default connection."
+                )
+                training_state.append_log(note)
+                await event_manager.publish({"type": "log", "line": note})
+                payload.cloud_connection_id = None
 
     noise_mode = payload.noise_mode
     if noise_mode == "high":
