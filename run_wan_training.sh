@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Simple WAN2.2 LoRA training runner
-# - Prompts for title prefix, author, and dataset path (with sensible defaults)
+# - Uses CLI inputs (with sensible defaults)
 # - Caches latents and text encoder outputs
 # - Trains HIGH noise and LOW noise models
 # - If 2+ GPUs are free, runs them concurrently; otherwise waits for a free GPU
@@ -33,17 +33,13 @@ TRAINING_MODE_INPUT="${WAN_TRAINING_MODE:-}"
 NOISE_MODE_INPUT="${WAN_NOISE_MODE:-}"
 CLI_CLOUD_CONNECTION_ID="${WAN_CLOUD_CONNECTION_ID:-}"
 AUTO_CONFIRM=0
-
-CLOUD_PERMISSION_DENIED=0
-CLOUD_CONNECTION_MESSAGE=""
-CLOUD_CONNECTIONS=()
 CPU_THREAD_SOURCE=""
 
 print_usage() {
   cat <<'EOF'
 Usage: run_wan_training.sh [options]
 
-Optional arguments (all fall back to interactive prompts when omitted):
+Optional arguments (defaults are used when omitted):
   --title-prefix VALUE             Set the title prefix for output names
   --author VALUE                   Set the metadata author
   --dataset PATH                   Path to dataset configuration toml
@@ -56,7 +52,7 @@ Optional arguments (all fall back to interactive prompts when omitted):
   --mode [t2v|i2v]                 Select the training task (text-to-video or image-to-video)
   --noise-mode [both|high|low]     Choose whether to train high noise, low noise, or both
   --cloud-connection-id VALUE      Upload to a specific Vast.ai cloud connection
-  --auto-confirm                   Skip the final confirmation prompt
+  --auto-confirm                   No-op (retained for compatibility)
   --help                           Show this message and exit
 
 Environment variable overrides:
@@ -149,6 +145,49 @@ done
 
 CLI_UPLOAD_CLOUD=$(normalize_yes_no "$CLI_UPLOAD_CLOUD")
 CLI_SHUTDOWN_INSTANCE=$(normalize_yes_no "$CLI_SHUTDOWN_INSTANCE")
+
+load_vast_env() {
+  local env_file="/etc/environment"
+  local line key value
+
+  [[ -f "$env_file" ]] || return 0
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%%$'\r'}"
+    [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+
+    if [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
+      key="${BASH_REMATCH[1]}"
+      value="${BASH_REMATCH[2]}"
+      case "$key" in
+        CONTAINER_ID|VAST_CONTAINER_ID|CONTAINER_API_KEY|PUBLIC_IPADDR|VAST_TCP_PORT_8080)
+          if [[ -z "${!key:-}" ]]; then
+            value="${value%\"}"
+            value="${value#\"}"
+            value="${value%\'}"
+            value="${value#\'}"
+            printf -v "$key" '%s' "$value"
+            export "$key"
+          fi
+          ;;
+      esac
+    fi
+  done < "$env_file"
+}
+
+get_container_id() {
+  if [[ -n "${CONTAINER_ID:-}" ]]; then
+    echo "$CONTAINER_ID"
+    return 0
+  fi
+  if [[ -n "${VAST_CONTAINER_ID:-}" ]]; then
+    echo "$VAST_CONTAINER_ID"
+    return 0
+  fi
+  return 1
+}
+
+load_vast_env
 
 is_vast_instance() {
   if [[ -n "${CONTAINER_ID:-}" || -n "${VAST_CONTAINER_ID:-}" || -n "${VAST_TCP_PORT_8080:-}" || -n "${PUBLIC_IPADDR:-}" ]]; then
@@ -259,7 +298,9 @@ determine_attention_flags() {
 }
 
 get_vast_vcpus() {
-  if [[ -z "${CONTAINER_ID:-}" ]]; then
+  local container_id
+  container_id=$(get_container_id || true)
+  if [[ -z "$container_id" ]]; then
     return 1
   fi
 
@@ -268,7 +309,7 @@ get_vast_vcpus() {
   fi
 
   local result
-  result=$(python3 - "$CONTAINER_ID" <<'PY'
+  result=$(python3 - "$container_id" <<'PY'
 import re
 import subprocess
 import sys
@@ -355,174 +396,15 @@ get_cpu_threads() {
   return 1
 }
 
-prompt_for_valid_api_key() {
-  if (( AUTO_CONFIRM )); then
-    echo ""
-    echo "Auto-confirm is enabled; skipping Vast.ai API key prompt. Cloud features will remain disabled."
-    return 1
-  fi
-
-  echo ""
-  echo "Your Vast.ai API key is invalid or expired."
-  echo "To get a valid API key with full permissions:"
-  echo "  1. Go to https://cloud.vast.ai/manage-keys/"
-  echo "  2. Create a new API key"
-  echo "  3. Enter it below"
-  echo ""
-  
-  while true; do
-    read -r -p "Enter your Vast.ai API key (or 'skip' to continue without cloud features): " api_key
-    
-    if [[ "$api_key" == "skip" ]]; then
-      echo "Skipping API key setup. Cloud features will be disabled."
-      return 1
-    fi
-    
-    if [[ -z "$api_key" ]]; then
-      echo "Please enter a valid API key or 'skip'."
-      continue
-    fi
-    
-    # Set the API key
-    if vastai set api-key "$api_key"; then
-      # Test if it works
-      local output
-      output=$(vastai show connections --raw 2>&1)
-      
-      if echo "$output" | grep -qi "failed with error 401"; then
-        echo "API key is still invalid or missing required permissions. Please try again."
-        continue
-      else
-        echo "✅ API key set successfully!"
-        return 0
-      fi
-    else
-      echo "Failed to set API key. Please try again."
-    fi
-  done
-}
-
-fetch_cloud_connections() {
-  local output
-  output=$(vastai show connections --raw 2>&1 || true)
-
-  if echo "$output" | grep -qi "failed with error 401"; then
-    CLOUD_PERMISSION_DENIED=1
-    CLOUD_CONNECTION_MESSAGE=$'Current Vast.ai API key lacks the permissions required to list cloud connections.\nCreate a new key at https://cloud.vast.ai/manage-keys (enable user_read and cloud permissions) and run: vastai set api-key <your-key>'
-    echo "Current API key cannot access cloud integrations (401)." >&2
-    return 1
-  fi
-
-  mapfile -t CLOUD_CONNECTIONS < <(
-    python - <<'PY'
-import json
-import sys
-
-text = sys.stdin.read()
-lines = [line.strip() for line in text.splitlines() if line.strip()]
-json_text = ""
-for i, line in enumerate(lines):
-    if line.startswith("[") or line.startswith("{"):
-        json_text = "\n".join(lines[i:])
-        break
-if not json_text:
-    sys.exit(0)
-try:
-    data = json.loads(json_text)
-except json.JSONDecodeError:
-    sys.exit(0)
-if isinstance(data, dict):
-    data = [data]
-for item in data:
-    if not isinstance(item, dict):
-        continue
-    connection_id = item.get("id")
-    if connection_id is None:
-        continue
-    name = item.get("name") or ""
-    cloud_type = item.get("cloud_type") or ""
-    print(f"{connection_id}\t{name}\t{cloud_type}")
-PY
-  <<<"$output"
-  )
-
-  if ((${#CLOUD_CONNECTIONS[@]})); then
-    return 0
-  fi
-  CLOUD_CONNECTION_MESSAGE=$'No cloud connections detected. Visit https://cloud.vast.ai/settings/ and open "cloud connection" to link a storage provider.'
-  return 1
-}
-
-select_cloud_connection() {
-  if [[ -n "${CLI_CLOUD_CONNECTION_ID:-}" ]]; then
-    echo "$CLI_CLOUD_CONNECTION_ID"
-    return 0
-  fi
-
-  if ((${#CLOUD_CONNECTIONS[@]} == 1)); then
-    echo "${CLOUD_CONNECTIONS[0]%%$'\t'*}"
-    return 0
-  fi
-
-  if ((AUTO_CONFIRM)); then
-    echo "${CLOUD_CONNECTIONS[0]%%$'\t'*}"
-    return 0
-  fi
-
-  echo "Multiple cloud connections detected:" >&2
-  local index=1
-  for entry in "${CLOUD_CONNECTIONS[@]}"; do
-    local connection_name
-    local cloud_type
-    local entry_id
-    entry_id="${entry%%$'\t'*}"
-    connection_name="$(cut -f2 <<<"$entry")"
-    cloud_type="$(cut -f3 <<<"$entry")"
-    if [[ -n "$cloud_type" ]]; then
-      echo "  [$index] ${connection_name:-$entry_id} ($cloud_type)" >&2
-    else
-      echo "  [$index] ${connection_name:-$entry_id}" >&2
-    fi
-    index=$((index + 1))
-  done
-
-  while true; do
-    read -r -p "Select a cloud connection to upload to [1-$((index - 1))]: " selection || true
-    if [[ "$selection" =~ ^[0-9]+$ ]] && (( selection >= 1 && selection < index )); then
-      echo "${CLOUD_CONNECTIONS[$((selection - 1))]%%$'\t'*}"
-      return 0
-    fi
-    echo "Invalid selection. Try again." >&2
-  done
-}
-
-check_cloud_configured() {
-  # Check if Vast.ai cloud connections are configured
-  CLOUD_PERMISSION_DENIED=0
-  CLOUD_CONNECTION_MESSAGE=""
-  if (( ! VAST_INSTANCE )); then
-    CLOUD_CONNECTION_MESSAGE="Cloud uploads are available only on Vast.ai instances."
-    return 1
-  fi
-  if ! command -v vastai >/dev/null 2>&1; then
-    echo "vastai CLI not found. Try: pip install vastai --user --break-system-packages" >&2
-    CLOUD_CONNECTION_MESSAGE="vastai CLI not found. Install it with: pip install vastai --user --break-system-packages"
-    return 1
-  fi
-
-  if fetch_cloud_connections; then
-    return 0
-  fi
-  return 1
-}
-
 setup_vast_api_key() {
   # Set up Vast.ai API key for instance management
   if (( ! VAST_INSTANCE )); then
     echo "Warning: Not running on Vast.ai. Instance shutdown is unavailable." >&2
     return 1
   fi
-  if [[ -z "${CONTAINER_ID:-}" ]]; then
+  local container_id
+  container_id=$(get_container_id || true)
+  if [[ -z "$container_id" ]]; then
     echo "Warning: CONTAINER_ID not found. Cannot set up instance shutdown." >&2
     return 1
   fi
@@ -559,40 +441,35 @@ setup_vast_api_key() {
 upload_to_cloud() {
   local lora_path="$1"
   local lora_name="$2"
-  local preferred_connection_id="${3:-}"
+  local connection_id="${3:-${CLI_CLOUD_CONNECTION_ID:-}}"
 
   if (( ! VAST_INSTANCE )); then
     echo "Cloud uploads are only available on Vast.ai instances. Skipping upload." >&2
     return 1
   fi
-  
-  if ! check_cloud_configured; then
-    echo "No cloud connections configured in Vast.ai. Skipping upload." >&2
-    return 1
-  fi
-  
-  local connection_id
-  if [[ -n "$preferred_connection_id" ]]; then
-    connection_id="$preferred_connection_id"
-  else
-    connection_id=$(select_cloud_connection || true)
-  fi
-  
+
   if [[ -z "$connection_id" ]]; then
-    echo "No cloud connection ID found. Skipping upload." >&2
+    echo "No cloud connection ID provided. Skipping upload." >&2
     return 1
   fi
-  
-  if [[ -z "${CONTAINER_ID:-}" ]]; then
+
+  local container_id
+  container_id=$(get_container_id || true)
+  if [[ -z "$container_id" ]]; then
     echo "Warning: CONTAINER_ID not found. Cannot upload to cloud." >&2
     return 1
   fi
-  
+
+  if ! command -v vastai >/dev/null 2>&1; then
+    echo "Warning: vastai CLI not found. Cannot upload to cloud." >&2
+    return 1
+  fi
+
   echo "Uploading $lora_name to cloud storage (connection: $connection_id)..."
   
   # Use vastai cloud copy to upload to cloud storage
   # Format: vastai cloud copy --src <src> --dst <dst> --instance <instance_id> --connection <connection_id> --transfer "Instance to Cloud"
-  if vastai cloud copy --src "$lora_path" --dst "/loras/WAN/$lora_name" --instance "$CONTAINER_ID" --connection "$connection_id" --transfer "Instance to Cloud"; then
+  if vastai cloud copy --src "$lora_path" --dst "/loras/WAN/$lora_name" --instance "$container_id" --connection "$connection_id" --transfer "Instance to Cloud"; then
     echo "✅ Successfully uploaded $lora_name to cloud storage"
     return 0
   else
@@ -606,7 +483,9 @@ shutdown_instance() {
     echo "Auto-shutdown is only available on Vast.ai instances. Skipping." >&2
     return 1
   fi
-  if [[ -z "${CONTAINER_ID:-}" ]]; then
+  local container_id
+  container_id=$(get_container_id || true)
+  if [[ -z "$container_id" ]]; then
     echo "Warning: CONTAINER_ID not found. Cannot shutdown instance." >&2
     return 1
   fi
@@ -616,8 +495,8 @@ shutdown_instance() {
     return 1
   fi
   
-  echo "Shutting down Vast.ai instance $CONTAINER_ID..."
-  if vastai stop instance "$CONTAINER_ID"; then
+  echo "Shutting down Vast.ai instance $container_id..."
+  if vastai stop instance "$container_id"; then
     echo "✅ Instance shutdown initiated"
     return 0
   else
@@ -665,83 +544,33 @@ main() {
     exit 1
   fi
 
-  # Prompt inputs with defaults
+  # Resolve inputs with defaults
   echo "WAN2.2 LoRA simple runner"
 
-  if [[ -z "${TITLE_PREFIX_INPUT:-}" ]]; then
-    if (( AUTO_CONFIRM )); then
-      TITLE_PREFIX="mylora"
-      echo "Title prefix (auto default): $TITLE_PREFIX"
-    else
-      read -r -p "Title prefix (default: mylora): " TITLE_PREFIX || true
-    fi
-  else
-    TITLE_PREFIX="$TITLE_PREFIX_INPUT"
-    echo "Title prefix (auto): $TITLE_PREFIX"
-  fi
-  TITLE_PREFIX=${TITLE_PREFIX:-mylora}
+  TITLE_PREFIX="${TITLE_PREFIX_INPUT:-mylora}"
+  echo "Title prefix: $TITLE_PREFIX"
   # Trim surrounding whitespace before replacing interior whitespace with dashes to avoid trailing hyphens
   TITLE_PREFIX="$(echo "$TITLE_PREFIX" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/[[:space:]]\+/-/g')"
 
-  if [[ -z "${AUTHOR_INPUT:-}" ]]; then
-    if (( AUTO_CONFIRM )); then
-      AUTHOR="authorName"
-      echo "Author (auto default): $AUTHOR"
-    else
-      read -r -p "Author (default: authorName): " AUTHOR || true
-    fi
-  else
-    AUTHOR="$AUTHOR_INPUT"
-    echo "Author (auto): $AUTHOR"
-  fi
-  AUTHOR=${AUTHOR:-authorName}
+  AUTHOR="${AUTHOR_INPUT:-authorName}"
+  echo "Author: $AUTHOR"
 
-  if [[ -z "${DATASET_INPUT:-}" ]]; then
-    if (( AUTO_CONFIRM )); then
-      DATASET="$DEFAULT_DATASET"
-      echo "Dataset path (auto default): $DATASET"
-    else
-      read -r -p "Dataset path (default: $DEFAULT_DATASET): " DATASET || true
-    fi
-  else
-    DATASET="$DATASET_INPUT"
-    echo "Dataset path (auto): $DATASET"
-  fi
-  DATASET=${DATASET:-$DEFAULT_DATASET}
+  DATASET="${DATASET_INPUT:-$DEFAULT_DATASET}"
+  echo "Dataset path: $DATASET"
 
-  local training_mode="$TRAINING_MODE_INPUT"
-  if [[ -z "${training_mode:-}" ]]; then
-    if (( AUTO_CONFIRM )); then
-      training_mode="t2v"
-      echo "Training task (auto default): $training_mode"
-    else
-      read -r -p "Training task (t2v/i2v, default: t2v): " training_mode || true
-    fi
-  else
-    echo "Training task (auto): $training_mode"
-  fi
-  training_mode=${training_mode:-t2v}
+  local training_mode="${TRAINING_MODE_INPUT:-t2v}"
+  echo "Training task: $training_mode"
   training_mode=${training_mode,,}
 
   local TRAIN_TASK
   local HIGH_TITLE
   local LOW_TITLE
   local -a CACHE_LATENTS_ARGS=()
-  local noise_mode="$NOISE_MODE_INPUT"
+  local noise_mode="${NOISE_MODE_INPUT:-both}"
   local RUN_HIGH=1
   local RUN_LOW=1
 
-  if [[ -z "${noise_mode:-}" ]]; then
-    if (( AUTO_CONFIRM )); then
-      noise_mode="both"
-      echo "Noise selection (auto default): $noise_mode"
-    else
-      read -r -p "Noise selection (high/low/both, default: both): " noise_mode || true
-    fi
-  else
-    echo "Noise selection (auto): $noise_mode"
-  fi
-  noise_mode=${noise_mode:-both}
+  echo "Noise selection: $noise_mode"
   noise_mode=${noise_mode,,}
 
   case "$noise_mode" in
@@ -795,148 +624,23 @@ main() {
     curl -fsSL "https://raw.githubusercontent.com/obsxrver/wan-training-webui/main/dataset-configs/dataset.toml" -o "$DATASET" || echo "Failed to download dataset.toml" >&2
   fi
 
-  if [[ -z "${SAVE_EVERY_INPUT:-}" ]]; then
-    if (( AUTO_CONFIRM )); then
-      SAVE_EVERY=""
-      echo "Save every N epochs (auto default): 20"
-    else
-      read -r -p "Save every N epochs (default: 100): " SAVE_EVERY || true
-    fi
-  else
-    SAVE_EVERY="$SAVE_EVERY_INPUT"
-    echo "Save every N epochs (auto): $SAVE_EVERY"
-  fi
-  SAVE_EVERY=${SAVE_EVERY:-20}
+  SAVE_EVERY="${SAVE_EVERY_INPUT:-20}"
+  echo "Save every N epochs: $SAVE_EVERY"
 
-  if [[ -z "${MAX_EPOCHS_INPUT:-}" ]]; then
-    if (( AUTO_CONFIRM )); then
-      MAX_EPOCHS="100"
-      echo "Max epochs (auto default): $MAX_EPOCHS"
-    else
-      read -r -p "Max epochs (default: 100): " MAX_EPOCHS || true
-    fi
-  else
-    MAX_EPOCHS="$MAX_EPOCHS_INPUT"
-    echo "Max epochs (auto): $MAX_EPOCHS"
-  fi
-  MAX_EPOCHS=${MAX_EPOCHS:-100}
+  MAX_EPOCHS="${MAX_EPOCHS_INPUT:-100}"
+  echo "Max epochs: $MAX_EPOCHS"
 
   CPU_PARAMS=($(calculate_cpu_params))
   DEFAULT_CPU_THREADS_PER_PROCESS=${CPU_PARAMS[0]}
   DEFAULT_MAX_DATA_LOADER_WORKERS=${CPU_PARAMS[1]}
 
-  echo ""
-  if [[ -z "${CPU_THREADS_INPUT:-}" ]]; then
-    if (( AUTO_CONFIRM )); then
-      CPU_THREADS_PER_PROCESS="$DEFAULT_CPU_THREADS_PER_PROCESS"
-      echo "CPU threads per process (auto default): $CPU_THREADS_PER_PROCESS"
-    else
-      read -r -p "CPU threads per process (default: $DEFAULT_CPU_THREADS_PER_PROCESS): " CPU_THREADS_PER_PROCESS || true
-    fi
-  else
-    CPU_THREADS_PER_PROCESS="$CPU_THREADS_INPUT"
-    echo "CPU threads per process (auto): $CPU_THREADS_PER_PROCESS"
-  fi
-  CPU_THREADS_PER_PROCESS=${CPU_THREADS_PER_PROCESS:-$DEFAULT_CPU_THREADS_PER_PROCESS}
-
-  if [[ -z "${MAX_WORKERS_INPUT:-}" ]]; then
-    if (( AUTO_CONFIRM )); then
-      MAX_DATA_LOADER_WORKERS="$DEFAULT_MAX_DATA_LOADER_WORKERS"
-      echo "Max data loader workers (auto default): $MAX_DATA_LOADER_WORKERS"
-    else
-      read -r -p "Max data loader workers (default: $DEFAULT_MAX_DATA_LOADER_WORKERS): " MAX_DATA_LOADER_WORKERS || true
-    fi
-  else
-    MAX_DATA_LOADER_WORKERS="$MAX_WORKERS_INPUT"
-    echo "Max data loader workers (auto): $MAX_DATA_LOADER_WORKERS"
-  fi
-  MAX_DATA_LOADER_WORKERS=${MAX_DATA_LOADER_WORKERS:-$DEFAULT_MAX_DATA_LOADER_WORKERS}
+  CPU_THREADS_PER_PROCESS="${CPU_THREADS_INPUT:-$DEFAULT_CPU_THREADS_PER_PROCESS}"
+  MAX_DATA_LOADER_WORKERS="${MAX_WORKERS_INPUT:-$DEFAULT_MAX_DATA_LOADER_WORKERS}"
 
   echo ""
   echo "=== Post-Training Options ==="
-
-  # Check for cloud storage upload option
-  UPLOAD_CLOUD="Y"
-  local cloud_ready=0
-  if check_cloud_configured; then
-    cloud_ready=1
-  fi
-  if [[ -n "${CLI_CLOUD_CONNECTION_ID:-}" && $cloud_ready -eq 1 ]]; then
-    if ! printf '%s\n' "${CLOUD_CONNECTIONS[@]}" | cut -f1 | grep -qx "$CLI_CLOUD_CONNECTION_ID"; then
-      echo "Warning: Selected cloud connection ID '$CLI_CLOUD_CONNECTION_ID' was not found. Using default connection." >&2
-      CLI_CLOUD_CONNECTION_ID=""
-    fi
-  fi
-
-  if [[ -n "${CLI_UPLOAD_CLOUD:-}" ]]; then
-    UPLOAD_CLOUD="$CLI_UPLOAD_CLOUD"
-    echo "Upload LoRAs to cloud storage after training? [auto: $UPLOAD_CLOUD]"
-    if [[ "$UPLOAD_CLOUD" =~ ^[Yy]$ && $cloud_ready -eq 0 ]]; then
-      if (( CLOUD_PERMISSION_DENIED )); then
-        echo "$CLOUD_CONNECTION_MESSAGE" >&2
-        echo "Disabling cloud upload because the current API key lacks required permissions." >&2
-        UPLOAD_CLOUD="N"
-      else
-        echo "$CLOUD_CONNECTION_MESSAGE" >&2
-        echo "Disabling cloud upload because no cloud connections are available." >&2
-        UPLOAD_CLOUD="N"
-      fi
-    fi
-  else
-    if (( cloud_ready )); then
-      echo "Cloud storage is configured in Vast.ai."
-      if (( AUTO_CONFIRM )); then
-        UPLOAD_CLOUD="Y"
-        echo "Upload LoRAs to cloud storage after training? [auto default: $UPLOAD_CLOUD]"
-      else
-        read -r -p "Upload LoRAs to cloud storage after training? [Y/n]: " UPLOAD_CLOUD || true
-        UPLOAD_CLOUD=${UPLOAD_CLOUD:-Y}
-      fi
-    else
-      if (( CLOUD_PERMISSION_DENIED )); then
-        echo "$CLOUD_CONNECTION_MESSAGE"
-        echo "Cloud uploads will be disabled until a full-access API key is configured."
-        UPLOAD_CLOUD="N"
-      else
-        echo "$CLOUD_CONNECTION_MESSAGE"
-        if (( ! VAST_INSTANCE )); then
-          UPLOAD_CLOUD="N"
-        else
-          if (( AUTO_CONFIRM )); then
-            UPLOAD_CLOUD="Y"
-            echo "Upload LoRAs to cloud storage after training? [auto default: $UPLOAD_CLOUD]"
-          else
-            read -r -p "Upload LoRAs to cloud storage after training? [Y/n]: " UPLOAD_CLOUD || true
-            UPLOAD_CLOUD=${UPLOAD_CLOUD:-Y}
-          fi
-        fi
-      fi
-    fi
-  fi
-
-  # Check for instance shutdown option
-  SHUTDOWN_INSTANCE="Y"
-  if [[ -n "${CLI_SHUTDOWN_INSTANCE:-}" ]]; then
-    SHUTDOWN_INSTANCE="$CLI_SHUTDOWN_INSTANCE"
-    echo "Shut down this instance after training? [auto: $SHUTDOWN_INSTANCE]"
-  else
-    if (( ! VAST_INSTANCE )); then
-      echo "Auto-shutdown is only available on Vast.ai instances."
-      SHUTDOWN_INSTANCE="N"
-    elif [[ -n "${CONTAINER_ID:-}" ]] && command -v vastai >/dev/null 2>&1; then
-      echo "Vast.ai instance management available."
-      if (( AUTO_CONFIRM )); then
-        SHUTDOWN_INSTANCE="Y"
-        echo "Shut down this instance after training to save costs? [auto default: $SHUTDOWN_INSTANCE]"
-      else
-        read -r -p "Shut down this instance after training to save costs? [Y/n]: " SHUTDOWN_INSTANCE || true
-        SHUTDOWN_INSTANCE=${SHUTDOWN_INSTANCE:-Y}
-      fi
-    else
-      echo "Vast.ai CLI not available or not running on Vast.ai instance."
-      SHUTDOWN_INSTANCE="N"
-    fi
-  fi
+  UPLOAD_CLOUD="${CLI_UPLOAD_CLOUD:-N}"
+  SHUTDOWN_INSTANCE="${CLI_SHUTDOWN_INSTANCE:-N}"
 
   echo ""
   echo "=== Configuration Summary ==="
@@ -965,17 +669,8 @@ main() {
   fi
   echo "  Auto-shutdown: $SHUTDOWN_INSTANCE"
   echo ""
-  if (( AUTO_CONFIRM )); then
-    PROCEED="Y"
-    echo "Proceed with training? [auto: Y]"
-  else
-    read -r -p "Proceed with training? [Y/n]: " PROCEED || true
-    PROCEED=${PROCEED:-Y}
-    if [[ ! "$PROCEED" =~ ^[Yy]?$ ]]; then
-      echo "Training cancelled."
-      exit 0
-    fi
-  fi
+  PROCEED="Y"
+  echo "Proceed with training? [auto: Y]"
 
   # Validate required files
   require "$PYTHON"
