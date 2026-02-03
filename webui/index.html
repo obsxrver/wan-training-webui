@@ -971,6 +971,14 @@
             </label>
           </div>
           <div id="cloudStatusMessage" class="status-note" aria-live="polite"></div>
+          <div class="form-row" id="cloudConnectionRow">
+            <label>
+              Cloud upload destination
+              <select id="cloudConnectionSelect" name="cloudConnection">
+                <option value="">Default cloud connection</option>
+              </select>
+            </label>
+          </div>
           <div class="form-row" id="vastApiSection">
             <label>
               Vast.ai API key for cloud uploads
@@ -1077,6 +1085,8 @@
       const shutdownCheckbox = form.querySelector('input[name="shutdownInstance"]');
       const shutdownLabel = shutdownCheckbox ? shutdownCheckbox.closest('.toggle') : null;
       const cloudStatusMessageEl = document.getElementById('cloudStatusMessage');
+      const cloudConnectionRow = document.getElementById('cloudConnectionRow');
+      const cloudConnectionSelect = document.getElementById('cloudConnectionSelect');
       const vastApiSection = document.getElementById('vastApiSection');
       const apiKeyInput = document.getElementById('vastApiKeyInput');
       const apiKeyButton = document.getElementById('saveApiKeyButton');
@@ -2006,6 +2016,7 @@
       function setCloudStatusUI(status) {
         currentCloudStatus = status || null;
         const isVastInstance = status?.is_vast_instance !== false;
+        const connections = Array.isArray(status?.connections) ? status.connections : [];
         if (cloudStatusMessageEl) {
           const message =
             status?.message ||
@@ -2020,6 +2031,36 @@
           } else {
             cloudStatusMessageEl.style.color = 'var(--muted)';
           }
+        }
+
+        if (cloudConnectionSelect) {
+          const currentValue = cloudConnectionSelect.value;
+          cloudConnectionSelect.innerHTML = '';
+          const defaultOption = document.createElement('option');
+          defaultOption.value = '';
+          defaultOption.textContent = 'Default cloud connection';
+          cloudConnectionSelect.appendChild(defaultOption);
+          connections.forEach((connection) => {
+            const option = document.createElement('option');
+            option.value = connection.id || '';
+            const labelParts = [connection.name || connection.id || 'Cloud connection'];
+            if (connection.cloud_type) {
+              labelParts.push(`(${connection.cloud_type})`);
+            }
+            option.textContent = labelParts.join(' ');
+            cloudConnectionSelect.appendChild(option);
+          });
+          if (connections.length === 1 && !currentValue) {
+            cloudConnectionSelect.value = connections[0].id || '';
+          } else if (currentValue) {
+            cloudConnectionSelect.value = currentValue;
+          }
+          cloudConnectionSelect.disabled = !status?.can_upload;
+        }
+
+        if (cloudConnectionRow) {
+          const showConnections = isVastInstance && connections.length > 1;
+          cloudConnectionRow.classList.toggle('is-hidden', !showConnections);
         }
 
         if (uploadCloudCheckbox) {
@@ -2620,6 +2661,7 @@
           auto_confirm: true,
           training_mode: trainingMode,
           noise_mode: noiseMode,
+          cloud_connection_id: (formData.get('cloudConnection') || '').toString().trim() || null,
         };
 
         if (currentCloudStatus && !currentCloudStatus.can_upload) {

@@ -31,10 +31,12 @@ CLI_UPLOAD_CLOUD="${WAN_UPLOAD_CLOUD:-}"
 CLI_SHUTDOWN_INSTANCE="${WAN_SHUTDOWN_INSTANCE:-}"
 TRAINING_MODE_INPUT="${WAN_TRAINING_MODE:-}"
 NOISE_MODE_INPUT="${WAN_NOISE_MODE:-}"
+CLI_CLOUD_CONNECTION_ID="${WAN_CLOUD_CONNECTION_ID:-}"
 AUTO_CONFIRM=0
 
 CLOUD_PERMISSION_DENIED=0
 CLOUD_CONNECTION_MESSAGE=""
+CLOUD_CONNECTIONS=()
 CPU_THREAD_SOURCE=""
 
 print_usage() {
@@ -53,6 +55,7 @@ Optional arguments (all fall back to interactive prompts when omitted):
   --shutdown-instance [Y|N]        Shut down Vast.ai instance after training
   --mode [t2v|i2v]                 Select the training task (text-to-video or image-to-video)
   --noise-mode [both|high|low]     Choose whether to train high noise, low noise, or both
+  --cloud-connection-id VALUE      Upload to a specific Vast.ai cloud connection
   --auto-confirm                   Skip the final confirmation prompt
   --help                           Show this message and exit
 
@@ -60,7 +63,7 @@ Environment variable overrides:
   WAN_TITLE_PREFIX, WAN_AUTHOR, WAN_DATASET_PATH, WAN_SAVE_EVERY,
   WAN_MAX_EPOCHS, WAN_CPU_THREADS_PER_PROCESS, WAN_MAX_DATA_LOADER_WORKERS,
   WAN_UPLOAD_CLOUD, WAN_SHUTDOWN_INSTANCE, WAN_TRAINING_MODE,
-  WAN_NOISE_MODE
+  WAN_NOISE_MODE, WAN_CLOUD_CONNECTION_ID
 EOF
 }
 
@@ -122,6 +125,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --noise-mode)
       NOISE_MODE_INPUT="$2"
+      shift 2
+      ;;
+    --cloud-connection-id)
+      CLI_CLOUD_CONNECTION_ID="$2"
       shift 2
       ;;
     --auto-confirm)
@@ -380,7 +387,7 @@ prompt_for_valid_api_key() {
     if vastai set api-key "$api_key"; then
       # Test if it works
       local output
-      output=$(vastai show connections 2>&1)
+      output=$(vastai show connections --raw 2>&1)
       
       if echo "$output" | grep -qi "failed with error 401"; then
         echo "API key is still invalid or missing required permissions. Please try again."
@@ -392,6 +399,100 @@ prompt_for_valid_api_key() {
     else
       echo "Failed to set API key. Please try again."
     fi
+  done
+}
+
+fetch_cloud_connections() {
+  local output
+  output=$(vastai show connections --raw 2>&1 || true)
+
+  if echo "$output" | grep -qi "failed with error 401"; then
+    CLOUD_PERMISSION_DENIED=1
+    CLOUD_CONNECTION_MESSAGE=$'Current Vast.ai API key lacks the permissions required to list cloud connections.\nCreate a new key at https://cloud.vast.ai/manage-keys (enable user_read and cloud permissions) and run: vastai set api-key <your-key>'
+    echo "Current API key cannot access cloud integrations (401)." >&2
+    return 1
+  fi
+
+  mapfile -t CLOUD_CONNECTIONS < <(
+    python - <<'PY'
+import json
+import sys
+
+text = sys.stdin.read()
+lines = [line.strip() for line in text.splitlines() if line.strip()]
+json_text = ""
+for i, line in enumerate(lines):
+    if line.startswith("[") or line.startswith("{"):
+        json_text = "\n".join(lines[i:])
+        break
+if not json_text:
+    sys.exit(0)
+try:
+    data = json.loads(json_text)
+except json.JSONDecodeError:
+    sys.exit(0)
+if isinstance(data, dict):
+    data = [data]
+for item in data:
+    if not isinstance(item, dict):
+        continue
+    connection_id = item.get("id")
+    if connection_id is None:
+        continue
+    name = item.get("name") or ""
+    cloud_type = item.get("cloud_type") or ""
+    print(f"{connection_id}\t{name}\t{cloud_type}")
+PY
+  <<<"$output"
+  )
+
+  if ((${#CLOUD_CONNECTIONS[@]})); then
+    return 0
+  fi
+  CLOUD_CONNECTION_MESSAGE=$'No cloud connections detected. Visit https://cloud.vast.ai/settings/ and open "cloud connection" to link a storage provider.'
+  return 1
+}
+
+select_cloud_connection() {
+  if [[ -n "${CLI_CLOUD_CONNECTION_ID:-}" ]]; then
+    echo "$CLI_CLOUD_CONNECTION_ID"
+    return 0
+  fi
+
+  if ((${#CLOUD_CONNECTIONS[@]} == 1)); then
+    echo "${CLOUD_CONNECTIONS[0]%%$'\t'*}"
+    return 0
+  fi
+
+  if ((AUTO_CONFIRM)); then
+    echo "${CLOUD_CONNECTIONS[0]%%$'\t'*}"
+    return 0
+  fi
+
+  echo "Multiple cloud connections detected:" >&2
+  local index=1
+  for entry in "${CLOUD_CONNECTIONS[@]}"; do
+    local connection_name
+    local cloud_type
+    local entry_id
+    entry_id="${entry%%$'\t'*}"
+    connection_name="$(cut -f2 <<<"$entry")"
+    cloud_type="$(cut -f3 <<<"$entry")"
+    if [[ -n "$cloud_type" ]]; then
+      echo "  [$index] ${connection_name:-$entry_id} ($cloud_type)" >&2
+    else
+      echo "  [$index] ${connection_name:-$entry_id}" >&2
+    fi
+    index=$((index + 1))
+  done
+
+  while true; do
+    read -r -p "Select a cloud connection to upload to [1-$((index - 1))]: " selection || true
+    if [[ "$selection" =~ ^[0-9]+$ ]] && (( selection >= 1 && selection < index )); then
+      echo "${CLOUD_CONNECTIONS[$((selection - 1))]%%$'\t'*}"
+      return 0
+    fi
+    echo "Invalid selection. Try again." >&2
   done
 }
 
@@ -409,24 +510,9 @@ check_cloud_configured() {
     return 1
   fi
 
-  # Check if API key is valid by testing vastai show connections
-  local output
-  output=$(vastai show connections 2>&1 || true)
-
-  if echo "$output" | grep -qi "failed with error 401"; then
-    CLOUD_PERMISSION_DENIED=1
-    CLOUD_CONNECTION_MESSAGE=$'Current Vast.ai API key lacks the permissions required to list cloud connections.\nCreate a new key at https://cloud.vast.ai/manage-keys (enable user_read and cloud permissions) and run: vastai set api-key <your-key>'
-    echo "Current API key cannot access cloud integrations (401)." >&2
-    return 1
-  fi
-
-  # Check if there are any cloud connections (skip header and URL lines)
-  local connections
-  connections=$(echo "$output" | awk 'NF && $1 ~ /^[0-9]+$/ {print $0; exit}')
-  if [[ -n "$connections" ]]; then
+  if fetch_cloud_connections; then
     return 0
   fi
-  CLOUD_CONNECTION_MESSAGE=$'No cloud connections detected. Visit https://cloud.vast.ai/settings/ and open "cloud connection" to link a storage provider.'
   return 1
 }
 
@@ -473,6 +559,7 @@ setup_vast_api_key() {
 upload_to_cloud() {
   local lora_path="$1"
   local lora_name="$2"
+  local preferred_connection_id="${3:-}"
 
   if (( ! VAST_INSTANCE )); then
     echo "Cloud uploads are only available on Vast.ai instances. Skipping upload." >&2
@@ -484,9 +571,12 @@ upload_to_cloud() {
     return 1
   fi
   
-  # Get the first available cloud connection
   local connection_id
-  connection_id=$(vastai show connections 2>/dev/null | grep -v "^ID" | grep -v "^https://" | head -1 | awk '{print $1}')
+  if [[ -n "$preferred_connection_id" ]]; then
+    connection_id="$preferred_connection_id"
+  else
+    connection_id=$(select_cloud_connection || true)
+  fi
   
   if [[ -z "$connection_id" ]]; then
     echo "No cloud connection ID found. Skipping upload." >&2
@@ -771,6 +861,12 @@ main() {
   if check_cloud_configured; then
     cloud_ready=1
   fi
+  if [[ -n "${CLI_CLOUD_CONNECTION_ID:-}" && $cloud_ready -eq 1 ]]; then
+    if ! printf '%s\n' "${CLOUD_CONNECTIONS[@]}" | cut -f1 | grep -qx "$CLI_CLOUD_CONNECTION_ID"; then
+      echo "Warning: Selected cloud connection ID '$CLI_CLOUD_CONNECTION_ID' was not found. Using default connection." >&2
+      CLI_CLOUD_CONNECTION_ID=""
+    fi
+  fi
 
   if [[ -n "${CLI_UPLOAD_CLOUD:-}" ]]; then
     UPLOAD_CLOUD="$CLI_UPLOAD_CLOUD"
@@ -864,6 +960,9 @@ main() {
   echo "  Mode:       ${training_mode^^}"
   echo "  Noise mode: ${noise_mode^^}"
   echo "  Upload to cloud: $UPLOAD_CLOUD"
+  if [[ -n "${CLI_CLOUD_CONNECTION_ID:-}" ]]; then
+    echo "  Cloud connection: $CLI_CLOUD_CONNECTION_ID"
+  fi
   echo "  Auto-shutdown: $SHUTDOWN_INSTANCE"
   echo ""
   if (( AUTO_CONFIRM )); then
@@ -1083,7 +1182,7 @@ main() {
   if [[ "$UPLOAD_CLOUD" =~ ^[Yy]$ ]]; then
     echo ""
     echo "=== Uploading to Cloud Storage ==="
-    upload_to_cloud "$RENAMED_OUTPUT" "${TITLE_PREFIX}" || echo "Failed to upload output directory"
+    upload_to_cloud "$RENAMED_OUTPUT" "${TITLE_PREFIX}" "$CLI_CLOUD_CONNECTION_ID" || echo "Failed to upload output directory"
   fi
   
   if [[ "$SHUTDOWN_INSTANCE" =~ ^[Yy]$ ]]; then
