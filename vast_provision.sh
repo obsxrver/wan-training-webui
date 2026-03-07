@@ -33,10 +33,6 @@ mkdir -p /workspace/wan-training-webui/dataset-configs
 
 curl -fsSL "https://raw.githubusercontent.com/obsxrver/wan-training-webui/main/dataset-configs/dataset.toml" -o /workspace/wan-training-webui/dataset-configs/dataset.toml
 curl -fsSL "https://raw.githubusercontent.com/obsxrver/wan-training-webui/main/dataset-configs/turbo.toml" -o /workspace/wan-training-webui/dataset-configs/turbo.toml
-curl -fsSL "https://raw.githubusercontent.com/obsxrver/wan-training-webui/main/run_wan_training.sh" -o /workspace/run_wan_training.sh
-curl -fsSL "https://raw.githubusercontent.com/obsxrver/wan-training-webui/main/analyze_training_logs.py" -o /workspace/analyze_training_logs.py
-chmod +x /workspace/run_wan_training.sh
-chmod +x /workspace/analyze_training_logs.py
 
 pip install -U "huggingface_hub>=0.20.0" --break-system-packages || \
 pip install -U huggingface_hub --break-system-packages || \

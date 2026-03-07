@@ -947,7 +947,7 @@ main() {
   echo ""
   echo "=== Analyzing Training Logs ==="
   if [[ -f "$PWD/run_high.log" || -f "$PWD/run_low.log" ]]; then
-    "$PYTHON" /workspace/analyze_training_logs.py "$PWD" || echo "Warning: Log analysis failed"
+    "$PYTHON" /workspace/wan-training-webui/analyze_training_logs.py "$PWD" || echo "Warning: Log analysis failed"
     if [[ -d "$PWD/training_analysis" ]]; then
       mv "$PWD/training_analysis" "$RENAMED_OUTPUT/training_analysis"
     fi
