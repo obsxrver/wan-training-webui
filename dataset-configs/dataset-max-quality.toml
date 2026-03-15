@@ -1,0 +1,23 @@
+# Global configurations
+[general]
+caption_extension = ".txt"
+batch_size = 1
+enable_bucket = true # Preserve Aspect Ratio of Original Image
+bucket_no_upscale = false # Upscale videos and images if they are below the target resolution
+num_repeats = 1 # optional, default is 1. Number of times to repeat the dataset. Useful to balance the multiple datasets with different sizes.
+
+# other datasets can be added here. each dataset can have different configurations
+
+# Image Training Settings
+[[datasets]]
+resolution = [960 , 960] # Train Images at 0.41 MP resolution - solid comprimise between visual quality and performance
+image_directory = "/workspace/musubi-tuner/dataset"
+cache_directory = "/workspace/musubi-tuner/dataset/cache"
+
+# Video Training Settings
+[[datasets]]
+resolution = [298,298] # 0.088 MP. It is enough
+video_directory = "/workspace/musubi-tuner/dataset"
+cache_directory = "/workspace/musubi-tuner/dataset/videocache"
+frame_extraction = "full"
+max_frames = 81 # Start at beginning of video and take 5 seconds at 16 FPS
