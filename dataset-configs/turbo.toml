@@ -17,4 +17,4 @@ video_directory = "/workspace/musubi-tuner/dataset"
 cache_directory = "/workspace/musubi-tuner/dataset/videocache"
 frame_extraction = "full" #start from the beginning of the video
 max_frames = 81 #only take 5 seconds
-resolution = [218,218] # 0.048 MP For Videos. Will be fast with possible quality degredation
+resolution = [208,208] # 0.048 MP For Videos. Will be fast with possible quality degredation

@@ -16,7 +16,7 @@ cache_directory = "/workspace/musubi-tuner/dataset/cache"
 
 # Video Training Settings
 [[datasets]]
-resolution = [298,298] # 0.088 MP. It is enough
+resolution = [304,304] # 0.088 MP. It is enough
 video_directory = "/workspace/musubi-tuner/dataset"
 cache_directory = "/workspace/musubi-tuner/dataset/videocache"
 frame_extraction = "full"
