@@ -1104,10 +1104,15 @@
       const NO_CAPTION_TEXT = 'No caption file found for this media.';
 
       const MAX_LOG_LINES = 400;
+      const STATUS_POLL_INTERVAL_MS = 2000;
+      const SSE_ERROR_LIMIT = 2;
       const logLines = [];
       const VIDEO_EXTENSION_PATTERN = /\.(mp4|mov|avi|mkv|webm|mpg|mpeg)$/i;
       let datasetPreviewItems = [];
       let datasetOverlayCurrentIndex = -1;
+      let statusPollTimer = null;
+      let eventSource = null;
+      let sseErrorCount = 0;
 
       function closeDatasetOverlay() {
         if (!datasetOverlay) {
@@ -2611,18 +2616,23 @@
         }
       }
 
-      function applySnapshot(snapshot) {
+      function applySnapshot(snapshot, options = {}) {
         setStatus(snapshot.status ? snapshot.status.charAt(0).toUpperCase() + snapshot.status.slice(1) : 'Idle');
-        startInFlight = false;
+        const syncRunConfig = options.syncRunConfig === true;
+        if (!startInFlight || snapshot.running) {
+          startInFlight = false;
+        }
         trainingRunning = !!snapshot.running;
         updateLiveProgressHeading(trainingRunning);
-        if (snapshot.noise_mode) {
+        if (syncRunConfig && snapshot.noise_mode) {
           const noiseInput = form.querySelector(`input[name="noiseMode"][value="${snapshot.noise_mode}"]`);
           if (noiseInput) {
             noiseInput.checked = true;
           }
         }
-        updateActiveRuns(Array.isArray(snapshot.active_runs) ? snapshot.active_runs : ['high', 'low']);
+        if (syncRunConfig) {
+          updateActiveRuns(Array.isArray(snapshot.active_runs) ? snapshot.active_runs : ['high', 'low']);
+        }
         applyHistory(0, snapshot.high?.history || []);
         applyHistory(1, snapshot.low?.history || []);
         updateRunDisplay('high', snapshot.high?.current || null);
@@ -2739,7 +2749,7 @@
         if (!data) return;
         switch (data.type) {
           case 'snapshot':
-            applySnapshot(data);
+            applySnapshot(data, { syncRunConfig: true });
             break;
           case 'status':
             setStatus(data.status ? data.status.charAt(0).toUpperCase() + data.status.slice(1) : 'Idle');
@@ -2770,11 +2780,69 @@
         }
       }
 
-      const eventSource = new EventSource('/events');
-      eventSource.onmessage = handleEvent;
-      eventSource.onerror = () => {
-        setMessage('Lost connection to live updates. Retrying…', true);
-      };
+      function isLocalHostname(hostname) {
+        return (
+          hostname === 'localhost' ||
+          hostname === '127.0.0.1' ||
+          hostname === '::1' ||
+          hostname === '[::1]' ||
+          hostname.endsWith('.localhost')
+        );
+      }
+
+      async function pollStatus() {
+        try {
+          const response = await fetch('/status', { cache: 'no-store' });
+          if (!response.ok) {
+            throw new Error('Status refresh failed');
+          }
+          const snapshot = await response.json();
+          const shouldSyncRunConfig = trainingRunning || startInFlight || !!snapshot.running;
+          applySnapshot(snapshot, { syncRunConfig: shouldSyncRunConfig });
+        } catch (error) {
+          setMessage('Unable to refresh live status. Retrying…', true);
+        }
+      }
+
+      function startStatusPolling() {
+        if (statusPollTimer) {
+          return;
+        }
+        pollStatus();
+        statusPollTimer = window.setInterval(pollStatus, STATUS_POLL_INTERVAL_MS);
+      }
+
+      function closeEventSource() {
+        if (eventSource) {
+          eventSource.close();
+          eventSource = null;
+        }
+      }
+
+      function startLiveUpdates() {
+        if (!window.EventSource || !isLocalHostname(window.location.hostname)) {
+          startStatusPolling();
+          return;
+        }
+
+        eventSource = new EventSource('/events');
+        eventSource.onmessage = (event) => {
+          sseErrorCount = 0;
+          handleEvent(event);
+        };
+        eventSource.onerror = () => {
+          sseErrorCount += 1;
+          if (sseErrorCount >= SSE_ERROR_LIMIT) {
+            closeEventSource();
+            startStatusPolling();
+            setMessage('Live updates switched to polling for this connection.');
+            return;
+          }
+          setMessage('Lost connection to live updates. Retrying…', true);
+        };
+      }
+
+      startLiveUpdates();
     </script>
   </body>
 </html>

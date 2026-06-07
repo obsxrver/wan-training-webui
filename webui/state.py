@@ -9,9 +9,10 @@ class EventManager:
     def __init__(self) -> None:
         self._listeners: List[asyncio.Queue] = []
         self._lock = asyncio.Lock()
+        self._max_queue_size = 256
 
     async def register(self) -> asyncio.Queue:
-        queue: asyncio.Queue = asyncio.Queue()
+        queue: asyncio.Queue = asyncio.Queue(maxsize=self._max_queue_size)
         async with self._lock:
             self._listeners.append(queue)
         return queue
@@ -25,7 +26,17 @@ class EventManager:
         async with self._lock:
             listeners = list(self._listeners)
         for queue in listeners:
-            await queue.put(event)
+            try:
+                queue.put_nowait(event)
+            except asyncio.QueueFull:
+                try:
+                    queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+                try:
+                    queue.put_nowait(event)
+                except asyncio.QueueFull:
+                    pass
 
 
 class TrainingState:

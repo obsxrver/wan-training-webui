@@ -47,6 +47,12 @@ download_watchdog_task: Optional[asyncio.Task] = None
 app = FastAPI(title="WAN 2.2 Training UI")
 app.add_middleware(TokenAuthMiddleware, token=AUTH_TOKEN)
 
+SSE_HEADERS = {
+    "Cache-Control": "no-cache, no-transform",
+    "Connection": "keep-alive",
+    "X-Accel-Buffering": "no",
+}
+
 
 def build_snapshot() -> Dict[str, Any]:
     snapshot = training_state.snapshot()
@@ -401,22 +407,26 @@ async def status() -> Dict[str, Any]:
 
 
 @app.get("/events")
-async def events() -> StreamingResponse:
+async def events(request: Request) -> StreamingResponse:
     queue = await event_manager.register()
     snapshot = build_snapshot()
 
     async def event_generator():
         try:
             yield f"data: {json.dumps({'type': 'snapshot', **snapshot})}\n\n"
-            while True:
-                event = await queue.get()
+            while not await request.is_disconnected():
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=15)
+                except asyncio.TimeoutError:
+                    yield ": keep-alive\n\n"
+                    continue
                 yield f"data: {json.dumps(event)}\n\n"
         except asyncio.CancelledError:
             pass
         finally:
             await event_manager.unregister(queue)
 
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+    return StreamingResponse(event_generator(), media_type="text/event-stream", headers=SSE_HEADERS)
 
 
 @app.on_event("startup")
