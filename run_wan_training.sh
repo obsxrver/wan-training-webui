@@ -771,45 +771,42 @@ main() {
     echo "Starting COMBINED on GPU $COMBINED_GPU (port $COMBINED_PORT) -> run_high.log"
     MASTER_ADDR=127.0.0.1 MASTER_PORT="$COMBINED_PORT" CUDA_VISIBLE_DEVICES="$COMBINED_GPU" \
     "$ACCELERATE" launch --num_cpu_threads_per_process "$CPU_THREADS_PER_PROCESS" --num_processes 1 --main_process_port "$COMBINED_PORT" src/musubi_tuner/wan_train_network.py \
-      --dataset_config "$DATASET" \
-      --discrete_flow_shift 3 \
+      --task "$TRAIN_TASK" \
       --dit "$LOW_DIT" \
       --dit_high_noise "$HIGH_DIT" \
-      --fp8_base \
-      --fp8_scaled \
-      --fp8_t5 \
-      --gradient_accumulation_steps 1 \
-      --gradient_checkpointing \
-      --img_in_txt_in_offloading \
-      --learning_rate 0.0001 \
-      --lr_scheduler cosine \
-      --lr_warmup_steps 100 \
-      --max_data_loader_n_workers "$MAX_DATA_LOADER_WORKERS" \
-      --max_timestep 1000 \
-      --max_train_epochs "$MAX_EPOCHS" \
-      --min_timestep 0 \
-      --mixed_precision fp16 \
-      --network_alpha 16 \
-      --network_args "verbose=True" "exclude_patterns=[]" \
-      --network_dim 16 \
-      --network_module networks.lora_wan \
+      --vae "$VAE" \
+      --t5 "$T5" \
+      --dataset_config "$DATASET" \
+      --sdpa \
       --offload_inactive_dit \
+      --mixed_precision fp16 \
+      --fp8_base \
       --optimizer_type adamw \
+      --learning_rate 3e-4 \
+      --gradient_checkpointing \
+      --gradient_accumulation_steps 1 \
+      --max_data_loader_n_workers "$MAX_DATA_LOADER_WORKERS" \
+      --network_module networks.lora_wan \
+      --network_dim 16 \
+      --network_alpha 16 \
+      --timestep_sampling shift \
+      --discrete_flow_shift 1.0 \
+      --max_train_epochs "$MAX_EPOCHS" \
+      --save_every_n_epochs "$SAVE_EVERY" \
+      --seed 5 \
+      --optimizer_args weight_decay=0.1 \
+      --max_grad_norm 0 \
+      --lr_scheduler polynomial \
+      --lr_scheduler_power 8 \
+      --lr_scheduler_min_lr_ratio=5e-5 \
       --output_dir "$MUSUBI_DIR/output" \
       --output_name "$COMBINED_TITLE" \
       --metadata_title "$COMBINED_TITLE" \
       --metadata_author "$AUTHOR" \
-      --persistent_data_loader_workers \
-      --save_every_n_epochs "$SAVE_EVERY" \
-      --seed 42 \
-      --t5 "$T5" \
-      --task "$TRAIN_TASK" \
+      --preserve_distribution_shape \
+      --min_timestep 0 \
+      --max_timestep 1000 \
       --timestep_boundary "$TIMESTEP_BOUNDARY" \
-      --timestep_sampling logsnr \
-      --vae "$VAE" \
-      --vae_cache_cpu \
-      --vae_dtype float16 \
-      --sdpa \
       > "$PWD/run_high.log" 2>&1 &
     COMBINED_PID=$!
     WAIT_PIDS+=("$COMBINED_PID")
