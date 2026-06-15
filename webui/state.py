@@ -2,7 +2,7 @@ import asyncio
 from collections import deque
 from typing import Any, Dict, List, Optional, Set
 
-from .config import MAX_HISTORY_POINTS, MAX_LOG_LINES
+from .config import MAX_HISTORY_POINTS, MAX_LOG_LINES, WEBUI_LOG
 
 
 def parse_duration_seconds(value: Any) -> Optional[int]:
@@ -158,7 +158,14 @@ class TrainingState:
             task.cancel()
 
     def append_log(self, line: str) -> None:
-        self.logs.append(line.rstrip())
+        cleaned = line.rstrip()
+        self.logs.append(cleaned)
+        try:
+            WEBUI_LOG.parent.mkdir(parents=True, exist_ok=True)
+            with WEBUI_LOG.open("a", encoding="utf-8") as handle:
+                handle.write(f"{cleaned}\n")
+        except OSError:
+            pass
 
     def set_run_pid(self, run: str, pid: int) -> None:
         if run not in self.run_pids:
@@ -198,6 +205,20 @@ class TrainingState:
         elif scheduled is not None and current.get("effective_total_epochs") != int(scheduled):
             current["effective_total_epochs"] = int(scheduled)
             changed = True
+
+        total_steps = current.get("total_steps")
+        if total_steps is not None:
+            total_steps_int = int(total_steps)
+            if current.get("scheduled_total_steps") != total_steps_int:
+                current["scheduled_total_steps"] = total_steps_int
+                changed = True
+
+            effective_total_steps = total_steps_int
+            if early_stop_epoch is not None and scheduled is not None and int(scheduled) > 0:
+                effective_total_steps = max(1, round(total_steps_int * (early_stop_epoch / int(scheduled))))
+            if current.get("effective_total_steps") != effective_total_steps:
+                current["effective_total_steps"] = effective_total_steps
+                changed = True
         return changed
 
     def _adjust_remaining_time(self, run: str, current: Dict[str, Any], fallback_remaining: str) -> str:

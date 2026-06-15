@@ -23,6 +23,7 @@ from .config import (
     REPO_ROOT,
     RUN_SCRIPT,
     TOKEN_ENV_VAR,
+    WEBUI_LOG,
 )
 from .dataset import (
     bulk_caption,
@@ -251,7 +252,7 @@ async def start_training(payload: TrainRequest) -> Dict[str, str]:
             detail = f"{detail} Pending: {', '.join(active)}."
         raise HTTPException(status_code=409, detail=detail)
 
-    for log_path in (HIGH_LOG, LOW_LOG):
+    for log_path in (HIGH_LOG, LOW_LOG, WEBUI_LOG):
         try:
             log_path.unlink()
         except FileNotFoundError:

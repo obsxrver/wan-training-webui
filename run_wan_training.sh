@@ -981,6 +981,8 @@ main() {
   else
     echo "Warning: No log files found to analyze"
   fi
+
+  [[ -f "$PWD/webui.log" && -d "$RENAMED_OUTPUT" ]] && cp "$PWD/webui.log" "$RENAMED_OUTPUT/"
   
   # Execute pre-configured post-training actions
   if [[ "$UPLOAD_CLOUD" =~ ^[Yy]$ ]]; then

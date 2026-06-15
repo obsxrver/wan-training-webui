@@ -2324,7 +2324,12 @@
         const lossValue = hasData && current.loss != null && Number.isFinite(Number(current.loss))
           ? Number(current.loss).toFixed(6)
           : '-';
-        const totalValue = hasData && current.total_steps != null ? current.total_steps : '-';
+        const totalValue =
+          hasData && current.effective_total_steps != null
+            ? current.effective_total_steps
+            : hasData && current.total_steps != null
+              ? current.total_steps
+              : '-';
         const epochValue = hasData && current.epoch != null ? current.epoch : '-';
         const totalEpochValue = hasData && current.total_epochs != null ? current.total_epochs : '-';
         const scheduledEpochValue = hasData && current.scheduled_max_epochs != null ? current.scheduled_max_epochs : totalEpochValue;
@@ -2636,12 +2641,15 @@
         if (!line) {
           return;
         }
+        const stickToBottom = logOutput.scrollHeight - logOutput.scrollTop - logOutput.clientHeight <= 24;
         logLines.push(line);
         if (logLines.length > MAX_LOG_LINES) {
           logLines.splice(0, logLines.length - MAX_LOG_LINES);
         }
         logOutput.textContent = logLines.join('\n');
-        logOutput.scrollTop = logOutput.scrollHeight;
+        if (stickToBottom) {
+          logOutput.scrollTop = logOutput.scrollHeight;
+        }
       }
 
       function applyHistory(datasetIndex, history) {
@@ -2715,8 +2723,11 @@
         logLines.length = 0;
         (snapshot.logs || []).forEach((line) => logLines.push(line));
         if (logLines.length) {
+          const stickToBottom = logOutput.scrollHeight - logOutput.scrollTop - logOutput.clientHeight <= 24;
           logOutput.textContent = logLines.join('\n');
-          logOutput.scrollTop = logOutput.scrollHeight;
+          if (stickToBottom) {
+            logOutput.scrollTop = logOutput.scrollHeight;
+          }
         } else {
           logOutput.textContent = 'Waiting for training output…';
         }

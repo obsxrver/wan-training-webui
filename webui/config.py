@@ -11,6 +11,7 @@ DATASET_CONFIG_ROOT = Path("/workspace/wan-training-webui/dataset-configs")
 LOG_DIR = Path("/workspace/musubi-tuner")
 HIGH_LOG = LOG_DIR / "run_high.log"
 LOW_LOG = LOG_DIR / "run_low.log"
+WEBUI_LOG = LOG_DIR / "webui.log"
 DOWNLOAD_STATUS_DIR = Path("/workspace/musubi-tuner/models/download_status")
 
 API_KEY_CONFIG_PATH = Path.home() / ".config" / "vastai" / "vast_api_key"
