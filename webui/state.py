@@ -5,6 +5,32 @@ from typing import Any, Dict, List, Optional, Set
 from .config import MAX_HISTORY_POINTS, MAX_LOG_LINES
 
 
+def parse_duration_seconds(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    parts = str(value).strip().split(":")
+    if len(parts) not in (2, 3):
+        return None
+    try:
+        numbers = [int(part) for part in parts]
+    except ValueError:
+        return None
+    if len(numbers) == 2:
+        minutes, seconds = numbers
+        return minutes * 60 + seconds
+    hours, minutes, seconds = numbers
+    return hours * 3600 + minutes * 60 + seconds
+
+
+def format_duration(seconds: float) -> str:
+    total_seconds = max(0, int(round(seconds)))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes}:{secs:02d}"
+
+
 class EventManager:
     def __init__(self) -> None:
         self._listeners: List[asyncio.Queue] = []
@@ -56,6 +82,10 @@ class TrainingState:
         self.stop_requested: bool = False
         self.active_runs: Set[str] = {"high", "low"}
         self.noise_mode: str = "both"
+        self.scheduled_max_epochs: Optional[int] = None
+        self.early_stop_epochs: Dict[str, Optional[int]] = {"high": None, "low": None}
+        self.early_stopped_runs: Set[str] = set()
+        self.run_pids: Dict[str, Optional[int]] = {"high": None, "low": None}
 
     def reset_for_start(self, active_runs: Optional[Set[str]] = None) -> None:
         self.active_runs = set(active_runs or {"high", "low"})
@@ -69,13 +99,26 @@ class TrainingState:
         self.stop_event = asyncio.Event()
         self.tasks = []
         self.stop_requested = False
+        self.early_stopped_runs = set()
+        self.run_pids = {"high": None, "low": None}
 
-    def mark_started(self, process: asyncio.subprocess.Process, active_runs: Set[str], noise_mode: str) -> None:
+    def mark_started(
+        self,
+        process: asyncio.subprocess.Process,
+        active_runs: Set[str],
+        noise_mode: str,
+        early_stop_epochs: Optional[Dict[str, Optional[int]]] = None,
+        scheduled_max_epochs: Optional[int] = None,
+    ) -> None:
         self.reset_for_start(active_runs)
         self.process = process
         self.status = "running"
         self.running = True
         self.noise_mode = noise_mode
+        self.scheduled_max_epochs = scheduled_max_epochs
+        self.early_stop_epochs = {"high": None, "low": None}
+        if early_stop_epochs:
+            self.early_stop_epochs.update(early_stop_epochs)
 
     def mark_finished(self, status: str) -> None:
         self.status = status
@@ -91,6 +134,8 @@ class TrainingState:
             "running": self.running,
             "active_runs": sorted(self.active_runs),
             "noise_mode": self.noise_mode,
+            "scheduled_max_epochs": self.scheduled_max_epochs,
+            "early_stop_epochs": dict(self.early_stop_epochs),
             "high": {
                 "history": list(self.history["high"]),
                 "current": dict(self.current["high"]) if self.current["high"] else None,
@@ -114,6 +159,69 @@ class TrainingState:
 
     def append_log(self, line: str) -> None:
         self.logs.append(line.rstrip())
+
+    def set_run_pid(self, run: str, pid: int) -> None:
+        if run not in self.run_pids:
+            return
+        self.run_pids[run] = pid
+
+    def get_run_pid(self, run: str) -> Optional[int]:
+        return self.run_pids.get(run)
+
+    def get_early_stop_epoch(self, run: str) -> Optional[int]:
+        target = self.early_stop_epochs.get(run)
+        return int(target) if target is not None else None
+
+    def has_early_stopped(self, run: str) -> bool:
+        return run in self.early_stopped_runs
+
+    def mark_early_stopped(self, run: str) -> None:
+        self.early_stopped_runs.add(run)
+
+    def _apply_run_epoch_context(self, run: str, current: Dict[str, Any]) -> bool:
+        changed = False
+        scheduled = current.get("total_epochs") or self.scheduled_max_epochs
+        if scheduled is not None:
+            scheduled_int = int(scheduled)
+            if current.get("scheduled_max_epochs") != scheduled_int:
+                current["scheduled_max_epochs"] = scheduled_int
+                changed = True
+
+        early_stop_epoch = self.get_early_stop_epoch(run)
+        if early_stop_epoch is not None:
+            if current.get("early_stop_epoch") != early_stop_epoch:
+                current["early_stop_epoch"] = early_stop_epoch
+                changed = True
+            if current.get("effective_total_epochs") != early_stop_epoch:
+                current["effective_total_epochs"] = early_stop_epoch
+                changed = True
+        elif scheduled is not None and current.get("effective_total_epochs") != int(scheduled):
+            current["effective_total_epochs"] = int(scheduled)
+            changed = True
+        return changed
+
+    def _adjust_remaining_time(self, run: str, current: Dict[str, Any], fallback_remaining: str) -> str:
+        early_stop_epoch = self.get_early_stop_epoch(run)
+        if early_stop_epoch is None:
+            return fallback_remaining
+
+        scheduled = current.get("scheduled_max_epochs") or current.get("total_epochs") or self.scheduled_max_epochs
+        step = current.get("step")
+        total_steps = current.get("total_steps")
+        elapsed_seconds = parse_duration_seconds(current.get("time_elapsed"))
+        if scheduled is None or step is None or total_steps is None or elapsed_seconds is None:
+            return fallback_remaining
+
+        scheduled_int = int(scheduled)
+        step_int = int(step)
+        total_steps_int = int(total_steps)
+        if scheduled_int <= 0 or step_int <= 0 or total_steps_int <= 0:
+            return fallback_remaining
+
+        effective_total_steps = max(1, round(total_steps_int * (early_stop_epoch / scheduled_int)))
+        remaining_steps = max(0, effective_total_steps - step_int)
+        seconds_per_step = elapsed_seconds / step_int
+        return format_duration(remaining_steps * seconds_per_step)
 
     async def update_metrics(self, run: str, metrics: Dict[str, Optional[Any]]) -> Optional[Dict[str, Optional[Dict[str, Any]]]]:
         entry = self.pending[run]
@@ -165,8 +273,13 @@ class TrainingState:
             changed = True
 
         remaining = metrics.get("time_remaining")
-        if remaining is not None and current.get("time_remaining") != remaining:
-            current["time_remaining"] = str(remaining)
+        if remaining is not None:
+            remaining_value = self._adjust_remaining_time(run, current, str(remaining))
+            if current.get("time_remaining") != remaining_value:
+                current["time_remaining"] = remaining_value
+                changed = True
+
+        if self._apply_run_epoch_context(run, current):
             changed = True
 
         point: Optional[Dict[str, Any]] = None

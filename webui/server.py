@@ -60,6 +60,28 @@ def build_snapshot() -> Dict[str, Any]:
     return snapshot
 
 
+def normalize_early_stop_epochs(payload: TrainRequest) -> Dict[str, Optional[int]]:
+    early_stop_epochs = {
+        "high": payload.early_stop_high_epoch,
+        "low": payload.early_stop_low_epoch,
+    }
+
+    if payload.noise_mode == "high":
+        early_stop_epochs["low"] = None
+    elif payload.noise_mode == "low":
+        early_stop_epochs["high"] = None
+    elif payload.noise_mode == "combined":
+        early_stop_epochs["low"] = None
+
+    for run, epoch in early_stop_epochs.items():
+        if epoch is not None and epoch >= payload.max_epochs:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{run.capitalize()} early stop epoch must be less than max epochs.",
+            )
+    return early_stop_epochs
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index() -> str:
     if not INDEX_HTML_PATH.exists():
@@ -219,6 +241,8 @@ async def start_training(payload: TrainRequest) -> Dict[str, str]:
     if training_state.running:
         raise HTTPException(status_code=409, detail="Training already in progress")
 
+    early_stop_epochs = normalize_early_stop_epochs(payload)
+
     download_status = get_download_status()
     if download_status.get("pending"):
         active = download_status.get("active") or []
@@ -306,7 +330,13 @@ async def start_training(payload: TrainRequest) -> Dict[str, str]:
         env=env,
         start_new_session=True,
     )
-    training_state.mark_started(process, active_runs, noise_mode)
+    training_state.mark_started(
+        process,
+        active_runs,
+        noise_mode,
+        early_stop_epochs=early_stop_epochs,
+        scheduled_max_epochs=payload.max_epochs,
+    )
 
     for line in conversion_logs:
         training_state.append_log(line)
@@ -318,6 +348,11 @@ async def start_training(payload: TrainRequest) -> Dict[str, str]:
         disabled_messages.append("Low noise training disabled by configuration.")
     if noise_mode == "combined":
         disabled_messages.append("Combined noise mode active: live metrics are shown in the High noise panel.")
+    if early_stop_epochs.get("high") is not None:
+        label = "Combined" if noise_mode == "combined" else "High"
+        disabled_messages.append(f"{label} early stop scheduled after epoch {early_stop_epochs['high']}.")
+    if early_stop_epochs.get("low") is not None:
+        disabled_messages.append(f"Low early stop scheduled after epoch {early_stop_epochs['low']}.")
     for message in disabled_messages:
         training_state.append_log(message)
         await event_manager.publish({"type": "log", "line": message})

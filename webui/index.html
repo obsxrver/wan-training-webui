@@ -654,6 +654,10 @@
         pointer-events: none;
       }
 
+      .field-disabled {
+        opacity: 0.5;
+      }
+
       .is-hidden {
         display: none;
       }
@@ -956,6 +960,16 @@
             </label>
           </div>
           <div class="form-row two-col">
+            <label id="earlyStopHighLabel">
+              <span id="earlyStopHighText">High early stop epoch</span>
+              <input type="number" name="earlyStopHighEpoch" min="1" placeholder="Off" />
+            </label>
+            <label id="earlyStopLowLabel">
+              <span id="earlyStopLowText">Low early stop epoch</span>
+              <input type="number" name="earlyStopLowEpoch" min="1" placeholder="Off" />
+            </label>
+          </div>
+          <div class="form-row two-col">
             <label class="toggle" id="uploadCloudToggle">
               <input type="checkbox" name="uploadCloud" checked />
               Upload LoRAs to cloud storage after training
@@ -1062,6 +1076,12 @@
       const statusEl = document.getElementById('status');
       const messageEl = document.getElementById('message');
       const startButton = document.getElementById('startButton');
+      const earlyStopHighInput = form.querySelector('input[name="earlyStopHighEpoch"]');
+      const earlyStopLowInput = form.querySelector('input[name="earlyStopLowEpoch"]');
+      const earlyStopHighLabel = document.getElementById('earlyStopHighLabel');
+      const earlyStopLowLabel = document.getElementById('earlyStopLowLabel');
+      const earlyStopHighText = document.getElementById('earlyStopHighText');
+      const earlyStopLowText = document.getElementById('earlyStopLowText');
       const highStepEl = document.getElementById('highStep');
       const highLossEl = document.getElementById('highLoss');
       const highEpochEl = document.getElementById('highEpoch');
@@ -2202,6 +2222,29 @@
         const value = (selectedNoise?.value || '').toLowerCase();
         const runs = value === 'high' ? ['high'] : value === 'low' ? ['low'] : value === 'combined' ? ['high'] : ['high', 'low'];
         updateActiveRuns(runs);
+        updateEarlyStopControls(value || 'both');
+      }
+
+      function setEarlyStopField(input, label, enabled) {
+        if (!input) {
+          return;
+        }
+        input.disabled = !enabled;
+        if (label) {
+          label.classList.toggle('field-disabled', !enabled);
+        }
+      }
+
+      function updateEarlyStopControls(noiseMode) {
+        const mode = (noiseMode || 'both').toLowerCase();
+        if (earlyStopHighText) {
+          earlyStopHighText.textContent = mode === 'combined' ? 'Combined early stop epoch' : 'High early stop epoch';
+        }
+        if (earlyStopLowText) {
+          earlyStopLowText.textContent = 'Low early stop epoch';
+        }
+        setEarlyStopField(earlyStopHighInput, earlyStopHighLabel, mode !== 'low');
+        setEarlyStopField(earlyStopLowInput, earlyStopLowLabel, mode === 'both' || mode === 'low');
       }
 
       function setRunState(run, isActive, message = '') {
@@ -2264,6 +2307,7 @@
           const value = (input.value || '').toLowerCase();
           const runs = value === 'high' ? ['high'] : value === 'low' ? ['low'] : value === 'combined' ? ['high'] : ['high', 'low'];
           updateActiveRuns(runs);
+          updateEarlyStopControls(value || 'both');
           saveFormState();
         });
       });
@@ -2283,9 +2327,18 @@
         const totalValue = hasData && current.total_steps != null ? current.total_steps : '-';
         const epochValue = hasData && current.epoch != null ? current.epoch : '-';
         const totalEpochValue = hasData && current.total_epochs != null ? current.total_epochs : '-';
+        const scheduledEpochValue = hasData && current.scheduled_max_epochs != null ? current.scheduled_max_epochs : totalEpochValue;
+        const earlyStopEpochValue = hasData && current.early_stop_epoch != null ? current.early_stop_epoch : null;
         let epochDisplay = '-';
         if (epochValue !== '-') {
-          epochDisplay = totalEpochValue !== '-' ? `${epochValue} / ${totalEpochValue}` : `${epochValue}`;
+          if (earlyStopEpochValue != null) {
+            epochDisplay =
+              scheduledEpochValue !== '-'
+                ? `${epochValue} / ${earlyStopEpochValue} stop (max ${scheduledEpochValue})`
+                : `${epochValue} / ${earlyStopEpochValue} stop`;
+          } else {
+            epochDisplay = scheduledEpochValue !== '-' ? `${epochValue} / ${scheduledEpochValue}` : `${epochValue}`;
+          }
         }
         const elapsedValue = hasData && current.time_elapsed ? current.time_elapsed : '-';
         const remainingValue = hasData && current.time_remaining ? current.time_remaining : '-';
@@ -2545,6 +2598,18 @@
           .join(', ');
       }
 
+      function parseOptionalPositiveInteger(value) {
+        const text = (value ?? '').toString().trim();
+        if (!text) {
+          return null;
+        }
+        const number = Number(text);
+        if (!Number.isInteger(number) || number < 1) {
+          return null;
+        }
+        return number;
+      }
+
       function updateControlState() {
         const disableStart = startInFlight || trainingRunning || downloadStatus.pending;
         startButton.disabled = disableStart;
@@ -2629,6 +2694,15 @@
           if (noiseInput) {
             noiseInput.checked = true;
           }
+          updateEarlyStopControls(snapshot.noise_mode);
+        }
+        if (syncRunConfig && snapshot.early_stop_epochs) {
+          if (earlyStopHighInput) {
+            earlyStopHighInput.value = snapshot.early_stop_epochs.high ?? '';
+          }
+          if (earlyStopLowInput) {
+            earlyStopLowInput.value = snapshot.early_stop_epochs.low ?? '';
+          }
         }
         if (syncRunConfig) {
           updateActiveRuns(Array.isArray(snapshot.active_runs) ? snapshot.active_runs : ['high', 'low']);
@@ -2662,12 +2736,19 @@
           noiseModeRaw === 'high' || noiseModeRaw === 'low' || noiseModeRaw === 'combined' ? noiseModeRaw : 'both';
         const selectedRuns =
           noiseMode === 'high' ? ['high'] : noiseMode === 'low' ? ['low'] : noiseMode === 'combined' ? ['high'] : ['high', 'low'];
+        const maxEpochs = Number(formData.get('maxEpochs')) || 100;
+        const earlyStopHighEpoch =
+          noiseMode === 'low' ? null : parseOptionalPositiveInteger(earlyStopHighInput?.value);
+        const earlyStopLowEpoch =
+          noiseMode === 'both' || noiseMode === 'low' ? parseOptionalPositiveInteger(earlyStopLowInput?.value) : null;
         const payload = {
           title_prefix: (formData.get('titlePrefix') || '').toString().trim() || 'mylora',
           author: (formData.get('author') || '').toString().trim() || 'authorName',
           dataset_path: (formData.get('datasetPath') || '').toString().trim(),
           save_every: Number(formData.get('saveEvery')) || 100,
-          max_epochs: Number(formData.get('maxEpochs')) || 100,
+          max_epochs: maxEpochs,
+          early_stop_high_epoch: earlyStopHighEpoch,
+          early_stop_low_epoch: earlyStopLowEpoch,
           upload_cloud: formData.get('uploadCloud') === 'on',
           shutdown_instance: formData.get('shutdownInstance') === 'on',
           convert_videos_to_16fps: formData.get('convertVideos') === 'on',
@@ -2683,6 +2764,16 @@
 
         if (!payload.dataset_path) {
           setMessage('Dataset config path is required.', true);
+          return;
+        }
+
+        if (earlyStopHighEpoch != null && earlyStopHighEpoch >= maxEpochs) {
+          setMessage('High early stop epoch must be less than max epochs.', true);
+          return;
+        }
+
+        if (earlyStopLowEpoch != null && earlyStopLowEpoch >= maxEpochs) {
+          setMessage('Low early stop epoch must be less than max epochs.', true);
           return;
         }
 

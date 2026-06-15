@@ -1,10 +1,80 @@
 import asyncio
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+import re
+import signal
 
 from .config import EPOCH_PATTERNS, LOSS_PATTERNS, RUN_SCRIPT, STEP_PATTERNS, TIME_PATTERN, TOTAL_STEP_PATTERNS
 from .models import TrainRequest
 from .state import event_manager, training_state
+
+RUN_PID_PATTERN = re.compile(r"^(HIGH|LOW|COMBINED)\s+PID:\s*(\d+)", re.IGNORECASE)
+
+
+def _collect_descendant_pids(pid: int) -> List[int]:
+    children_by_parent: Dict[int, List[int]] = {}
+    proc_dir = Path("/proc")
+    if not proc_dir.exists():
+        return []
+
+    for entry in proc_dir.iterdir():
+        if not entry.name.isdigit():
+            continue
+        stat_path = entry / "stat"
+        try:
+            stat = stat_path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        try:
+            after_name = stat.rsplit(")", 1)[1].strip()
+            parent_pid = int(after_name.split()[1])
+            child_pid = int(entry.name)
+        except (IndexError, ValueError):
+            continue
+        children_by_parent.setdefault(parent_pid, []).append(child_pid)
+
+    descendants: List[int] = []
+    stack = list(children_by_parent.get(pid, []))
+    while stack:
+        child_pid = stack.pop()
+        descendants.append(child_pid)
+        stack.extend(children_by_parent.get(child_pid, []))
+    return descendants
+
+
+def _terminate_pid_tree(pid: int) -> None:
+    pids = _collect_descendant_pids(pid)
+    pids.append(pid)
+    for target_pid in pids:
+        try:
+            os.kill(target_pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+
+
+async def _request_early_stop(run: str, current: Dict[str, Any]) -> None:
+    if training_state.has_early_stopped(run):
+        return
+
+    early_stop_epoch = training_state.get_early_stop_epoch(run)
+    epoch = current.get("epoch")
+    if early_stop_epoch is None or epoch is None or int(epoch) < early_stop_epoch + 1:
+        return
+
+    pid = training_state.get_run_pid(run)
+    if pid is None:
+        return
+
+    training_state.mark_early_stopped(run)
+    label = "Combined" if training_state.noise_mode == "combined" and run == "high" else run.capitalize()
+    message = (
+        f"{label} training reached epoch {epoch}; early stop epoch {early_stop_epoch} is complete. "
+        "Stopping that training process..."
+    )
+    training_state.append_log(message)
+    await event_manager.publish({"type": "log", "line": message})
+    await asyncio.to_thread(_terminate_pid_tree, pid)
 
 
 async def stream_process_output(process: asyncio.subprocess.Process) -> None:
@@ -16,6 +86,11 @@ async def stream_process_output(process: asyncio.subprocess.Process) -> None:
             break
         decoded = line.decode("utf-8", errors="ignore").rstrip()
         if decoded:
+            pid_match = RUN_PID_PATTERN.search(decoded)
+            if pid_match:
+                pid_label = pid_match.group(1).lower()
+                run = "high" if pid_label == "combined" else pid_label
+                training_state.set_run_pid(run, int(pid_match.group(2)))
             training_state.append_log(decoded)
             await event_manager.publish({"type": "log", "line": decoded})
 
@@ -106,6 +181,8 @@ async def monitor_log_file(path: Path, run: str) -> None:
                         if current:
                             event["current"] = current
                         await event_manager.publish(event)
+                        if current:
+                            await _request_early_stop(run, current)
                     position = handle.tell()
             except OSError:
                 position = 0
@@ -128,6 +205,8 @@ async def monitor_log_file(path: Path, run: str) -> None:
                     if current:
                         event["current"] = current
                     await event_manager.publish(event)
+                    if current:
+                        await _request_early_stop(run, current)
         except OSError:
             pass
 

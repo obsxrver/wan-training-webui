@@ -271,30 +271,36 @@ s.close()
 PY
 }
 
-check_low_vram() {
+check_vram() {
   # Get VRAM in MB for first GPU (assuming all GPUs are identical)
   local vram_mb
   vram_mb=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ' ')
   if [[ -z "$vram_mb" || ! "$vram_mb" =~ ^[0-9]+$ ]]; then
-    echo "Warning: Could not detect GPU VRAM, defaulting to xformers" >&2
+    echo "Warning: Could not detect GPU VRAM" >&2
     return 1
   fi
-  
+
   local vram_gb=$((vram_mb / 1024))
   echo "Detected GPU VRAM: ${vram_gb}GB" >&2
-  
-  if [[ "$vram_gb" -lt 33 ]]; then
-    return 0  # Low VRAM
-  else
-    return 1  # High VRAM
-  fi
+
+  echo "$vram_mb"
 }
-# block swap on anything 32GB or less VRAM
+
+# block swap on anything under 33GB VRAM
 determine_attention_flags() {
-  if check_low_vram; then
+  local vram_mb="${1:-}"
+  if [[ -n "$vram_mb" && "$vram_mb" -lt $((33 * 1024)) ]]; then
     echo "--sdpa --blocks_to_swap 1"
-  else
-    echo "--sdpa"
+    return
+  fi
+
+  echo "--sdpa"
+}
+
+determine_fp8_base_flag() {
+  local vram_mb="${1:-}"
+  if [[ -n "$vram_mb" && "$vram_mb" -lt $((60 * 1024)) ]]; then
+    echo "--fp8_base"
   fi
 }
 
@@ -714,8 +720,16 @@ main() {
 
   ensure_accelerate_default
 
-  ATTN_FLAGS=$(determine_attention_flags)
+  local VRAM_MB
+  VRAM_MB=$(check_vram || true)
+  ATTN_FLAGS=$(determine_attention_flags "$VRAM_MB")
+  FP8_BASE_FLAG=$(determine_fp8_base_flag "$VRAM_MB")
   echo "Using attention flags: $ATTN_FLAGS"
+  if [[ -n "$FP8_BASE_FLAG" ]]; then
+    echo "Using fp8 base flag: $FP8_BASE_FLAG"
+  else
+    echo "Using fp8 base flag: disabled"
+  fi
   local LOGDIR="$MUSUBI_DIR/logs"
   mkdir -p "$LOGDIR"
 
@@ -777,10 +791,10 @@ main() {
       --vae "$VAE" \
       --t5 "$T5" \
       --dataset_config "$DATASET" \
-      --sdpa \
+      $ATTN_FLAGS \
       --offload_inactive_dit \
       --mixed_precision fp16 \
-      --fp8_base \
+      $FP8_BASE_FLAG \
       --optimizer_type adamw \
       --learning_rate 3e-4 \
       --gradient_checkpointing \
@@ -825,7 +839,7 @@ main() {
       --dataset_config "$DATASET" \
       $ATTN_FLAGS \
       --mixed_precision fp16 \
-      --fp8_base \
+      $FP8_BASE_FLAG \
       --optimizer_type adamw \
       --learning_rate 3e-4 \
       --gradient_checkpointing \
@@ -877,7 +891,7 @@ main() {
       --dataset_config "$DATASET" \
       $ATTN_FLAGS \
       --mixed_precision fp16 \
-      --fp8_base \
+      $FP8_BASE_FLAG \
       --optimizer_type adamw \
       --learning_rate 3e-4 \
       --gradient_checkpointing \
@@ -932,7 +946,17 @@ main() {
 
   for pid in "${WAIT_PIDS[@]}"; do
     if [[ -n "$pid" ]]; then
-      wait "$pid"
+      if wait "$pid"; then
+        :
+      else
+        wait_status=$?
+        if [[ "$wait_status" -eq 143 || "$wait_status" -eq 137 ]]; then
+          echo "Training process $pid stopped before scheduled max epochs."
+        else
+          echo "Training process $pid failed with exit code $wait_status." >&2
+          exit "$wait_status"
+        fi
+      fi
     fi
   done
   echo "✅ Training completed!"
