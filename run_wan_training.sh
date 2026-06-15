@@ -719,6 +719,9 @@ main() {
   cd "$MUSUBI_DIR"
 
   ensure_accelerate_default
+  local EARLY_STOP_MARKER_DIR="$PWD/early_stop_pids"
+  rm -rf "$EARLY_STOP_MARKER_DIR"
+  mkdir -p "$EARLY_STOP_MARKER_DIR"
 
   local VRAM_MB
   VRAM_MB=$(check_vram || true)
@@ -950,7 +953,9 @@ main() {
         :
       else
         wait_status=$?
-        if [[ "$wait_status" -eq 143 || "$wait_status" -eq 137 ]]; then
+        if [[ -f "$EARLY_STOP_MARKER_DIR/$pid" ]]; then
+          echo "Training process $pid stopped by configured early stop (exit code $wait_status)."
+        elif [[ "$wait_status" -eq 143 || "$wait_status" -eq 137 ]]; then
           echo "Training process $pid stopped before scheduled max epochs."
         else
           echo "Training process $pid failed with exit code $wait_status." >&2

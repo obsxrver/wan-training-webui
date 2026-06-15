@@ -780,6 +780,10 @@
         white-space: pre-wrap;
       }
 
+      #logOutput .log-line {
+        display: block;
+      }
+
       @media (max-width: 768px) {
         header {
           padding: 1.5rem 1rem 1rem;
@@ -2505,7 +2509,7 @@
           setRunState(run, isActive, isActive ? '' : 'Disabled in configuration.');
         });
         logLines.length = 0;
-        logOutput.textContent = 'Waiting for training output…';
+        showLogPlaceholder();
         stopButton.disabled = true;
       }
 
@@ -2637,16 +2641,80 @@
         updateControlState();
       }
 
+      function isLogNearBottom() {
+        return logOutput.scrollHeight - logOutput.scrollTop - logOutput.clientHeight <= 24;
+      }
+
+      function createLogLineElement(line) {
+        const element = document.createElement('span');
+        element.className = 'log-line';
+        element.textContent = line;
+        return element;
+      }
+
+      function showLogPlaceholder() {
+        logOutput.replaceChildren(document.createTextNode('Waiting for training output…'));
+      }
+
+      function appendRenderedLogLine(line) {
+        if (!logOutput.querySelector('.log-line')) {
+          logOutput.replaceChildren();
+        }
+        logOutput.appendChild(createLogLineElement(line));
+      }
+
+      function trimRenderedLogLines() {
+        while (logLines.length > MAX_LOG_LINES) {
+          logLines.shift();
+          const firstLine = logOutput.querySelector('.log-line');
+          if (firstLine) {
+            firstLine.remove();
+          }
+        }
+      }
+
+      function sameLogLines(nextLines) {
+        return nextLines.length === logLines.length && nextLines.every((line, index) => line === logLines[index]);
+      }
+
+      function renderLogLines(nextLines) {
+        const stickToBottom = isLogNearBottom();
+        logLines.length = 0;
+        nextLines.forEach((line) => logLines.push(line));
+        logOutput.replaceChildren();
+        logLines.forEach((line) => appendRenderedLogLine(line));
+        if (stickToBottom) {
+          logOutput.scrollTop = logOutput.scrollHeight;
+        }
+      }
+
+      function syncLogSnapshot(nextLines) {
+        const normalized = Array.isArray(nextLines) ? nextLines.filter((line) => line) : [];
+        if (!normalized.length) {
+          logLines.length = 0;
+          showLogPlaceholder();
+          return;
+        }
+        if (sameLogLines(normalized)) {
+          return;
+        }
+        const canAppend = logLines.length > 0 && normalized.length >= logLines.length
+          && logLines.every((line, index) => line === normalized[index]);
+        if (!canAppend) {
+          renderLogLines(normalized);
+          return;
+        }
+        normalized.slice(logLines.length).forEach((line) => updateLog(line));
+      }
+
       function updateLog(line) {
         if (!line) {
           return;
         }
-        const stickToBottom = logOutput.scrollHeight - logOutput.scrollTop - logOutput.clientHeight <= 24;
+        const stickToBottom = isLogNearBottom();
         logLines.push(line);
-        if (logLines.length > MAX_LOG_LINES) {
-          logLines.splice(0, logLines.length - MAX_LOG_LINES);
-        }
-        logOutput.textContent = logLines.join('\n');
+        appendRenderedLogLine(line);
+        trimRenderedLogLines();
         if (stickToBottom) {
           logOutput.scrollTop = logOutput.scrollHeight;
         }
@@ -2720,17 +2788,7 @@
         updateRunDisplay('high', snapshot.high?.current || null);
         updateRunDisplay('low', snapshot.low?.current || null);
         chart.update('none');
-        logLines.length = 0;
-        (snapshot.logs || []).forEach((line) => logLines.push(line));
-        if (logLines.length) {
-          const stickToBottom = logOutput.scrollHeight - logOutput.scrollTop - logOutput.clientHeight <= 24;
-          logOutput.textContent = logLines.join('\n');
-          if (stickToBottom) {
-            logOutput.scrollTop = logOutput.scrollHeight;
-          }
-        } else {
-          logOutput.textContent = 'Waiting for training output…';
-        }
+        syncLogSnapshot(snapshot.logs || []);
 
         applyDownloadStatus(snapshot.downloads || {});
         updateControlState();

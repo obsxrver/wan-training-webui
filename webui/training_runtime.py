@@ -5,7 +5,15 @@ from typing import Any, Dict, List, Optional
 import re
 import signal
 
-from .config import EPOCH_PATTERNS, LOSS_PATTERNS, RUN_SCRIPT, STEP_PATTERNS, TIME_PATTERN, TOTAL_STEP_PATTERNS
+from .config import (
+    EARLY_STOP_MARKER_DIR,
+    EPOCH_PATTERNS,
+    LOSS_PATTERNS,
+    RUN_SCRIPT,
+    STEP_PATTERNS,
+    TIME_PATTERN,
+    TOTAL_STEP_PATTERNS,
+)
 from .models import TrainRequest
 from .state import event_manager, training_state
 
@@ -53,6 +61,18 @@ def _terminate_pid_tree(pid: int) -> None:
             pass
 
 
+def _write_early_stop_marker(pid: int, run: str, early_stop_epoch: int, reached_epoch: Any) -> None:
+    try:
+        EARLY_STOP_MARKER_DIR.mkdir(parents=True, exist_ok=True)
+        marker = EARLY_STOP_MARKER_DIR / str(pid)
+        marker.write_text(
+            f"run={run}\nearly_stop_epoch={early_stop_epoch}\nreached_epoch={reached_epoch}\n",
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
 async def _request_early_stop(run: str, current: Dict[str, Any]) -> None:
     if training_state.has_early_stopped(run):
         return
@@ -74,6 +94,8 @@ async def _request_early_stop(run: str, current: Dict[str, Any]) -> None:
     )
     training_state.append_log(message)
     await event_manager.publish({"type": "log", "line": message})
+    await asyncio.to_thread(_write_early_stop_marker, pid, run, early_stop_epoch, epoch)
+    await asyncio.sleep(10)
     await asyncio.to_thread(_terminate_pid_tree, pid)
 
 
