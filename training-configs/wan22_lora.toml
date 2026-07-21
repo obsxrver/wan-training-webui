@@ -1,0 +1,40 @@
+# Advanced Musubi Tuner options shared by every Wan 2.2 LoRA run.
+#
+# Edit this file to tune training without changing run_wan_training.sh. Musubi
+# flattens the sections below, so the section names are only for readability.
+#
+# The WebUI/launcher supplies run-specific values on the command line, which
+# take precedence over matching values here: task, model and dataset paths,
+# output names, metadata author/title, max_train_epochs, save_every_n_epochs,
+# max_data_loader_n_workers, and timestep ranges. Attention, block swapping,
+# and fp8_base are also selected automatically for the available GPU.
+
+[precision]
+mixed_precision = "fp16"
+
+[optimizer]
+optimizer_type = "adamw"
+optimizer_args = ["weight_decay=0.1"]
+learning_rate = 3e-4
+max_grad_norm = 0
+
+[network]
+network_module = "networks.lora_wan"
+network_dim = 16
+network_alpha = 16
+training_comment = "Created with Wan 2.2 LoRA Training WebUI: https://github.com/obsxrver/wan-training-webui"
+
+[training]
+gradient_checkpointing = true
+gradient_accumulation_steps = 1
+seed = 5
+
+[timestep]
+timestep_sampling = "shift"
+discrete_flow_shift = 1.0
+preserve_distribution_shape = true
+
+[scheduler]
+lr_scheduler = "polynomial"
+lr_scheduler_power = 8
+lr_scheduler_min_lr_ratio = 5e-5
