@@ -1,3 +1,4 @@
+import os
 import re
 from pathlib import Path
 from typing import FrozenSet, Optional
@@ -8,6 +9,9 @@ INDEX_HTML_PATH = Path(__file__).with_name("index.html")
 
 DATASET_ROOT = Path("/workspace/musubi-tuner/dataset")
 DATASET_CONFIG_ROOT = Path("/workspace/wan-training-webui/dataset-configs")
+TRAINING_CONFIG_PATH = Path(
+    os.environ.get("WAN_TRAINING_CONFIG_PATH", str(REPO_ROOT / "training-configs" / "wan22_lora.toml"))
+).expanduser().resolve()
 LOG_DIR = Path("/workspace/musubi-tuner")
 HIGH_LOG = LOG_DIR / "run_high.log"
 LOW_LOG = LOG_DIR / "run_low.log"

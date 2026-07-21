@@ -4,14 +4,16 @@ set -euo pipefail
 # Simple WAN2.2 LoRA training runner
 # - Uses CLI inputs (with sensible defaults)
 # - Caches latents and text encoder outputs
+# - Loads advanced training options from an editable Musubi Tuner TOML file
 # - Trains HIGH noise, LOW noise, or COMBINED noise models
 # - If 2+ GPUs are free, runs them concurrently; otherwise waits for a free GPU
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MUSUBI_DIR="/workspace/musubi-tuner"
 DEFAULT_DATASET="/workspace/wan-training-webui/dataset-configs/dataset.toml"
+DEFAULT_TRAINING_CONFIG="$SCRIPT_DIR/training-configs/wan22_lora.toml"
 PYTHON="/venv/main/bin/python"
 ACCELERATE="/venv/main/bin/accelerate" #todo install in provisioning if errors
-
 VAE="$MUSUBI_DIR/models/vae/split_files/vae/wan_2.1_vae.safetensors"
 T5="$MUSUBI_DIR/models/text_encoders/models_t5_umt5-xxl-enc-bf16.pth"
 T2V_HIGH_DIT="$MUSUBI_DIR/models/diffusion_models/split_files/diffusion_models/wan2.2_t2v_high_noise_14B_fp16.safetensors"
@@ -23,6 +25,7 @@ I2V_LOW_DIT="$MUSUBI_DIR/models/diffusion_models/split_files/diffusion_models/wa
 TITLE_PREFIX_INPUT="${WAN_TITLE_PREFIX:-}"
 AUTHOR_INPUT="${WAN_AUTHOR:-}"
 DATASET_INPUT="${WAN_DATASET_PATH:-}"
+TRAINING_CONFIG_INPUT="${WAN_TRAINING_CONFIG_PATH:-}"
 SAVE_EVERY_INPUT="${WAN_SAVE_EVERY:-}"
 MAX_EPOCHS_INPUT="${WAN_MAX_EPOCHS:-}"
 CPU_THREADS_INPUT="${WAN_CPU_THREADS_PER_PROCESS:-}"
@@ -43,6 +46,7 @@ Optional arguments (defaults are used when omitted):
   --title-prefix VALUE             Set the title prefix for output names
   --author VALUE                   Set the metadata author
   --dataset PATH                   Path to dataset configuration toml
+  --training-config PATH           Path to Musubi training configuration toml
   --save-every N                   Save every N epochs
   --max-epochs N                   Maximum epochs to train
   --cpu-threads-per-process N      Number of CPU threads per process
@@ -57,7 +61,8 @@ Optional arguments (defaults are used when omitted):
   --help                           Show this message and exit
 
 Environment variable overrides:
-  WAN_TITLE_PREFIX, WAN_AUTHOR, WAN_DATASET_PATH, WAN_SAVE_EVERY,
+  WAN_TITLE_PREFIX, WAN_AUTHOR, WAN_DATASET_PATH, WAN_TRAINING_CONFIG_PATH,
+  WAN_SAVE_EVERY,
   WAN_MAX_EPOCHS, WAN_CPU_THREADS_PER_PROCESS, WAN_MAX_DATA_LOADER_WORKERS,
   WAN_UPLOAD_CLOUD, WAN_SHUTDOWN_INSTANCE, WAN_TRAINING_MODE,
   WAN_NOISE_MODE, WAN_CLOUD_CONNECTION_ID
@@ -90,6 +95,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --dataset)
       DATASET_INPUT="$2"
+      shift 2
+      ;;
+    --training-config)
+      TRAINING_CONFIG_INPUT="$2"
       shift 2
       ;;
     --save-every)
@@ -565,6 +574,9 @@ main() {
   DATASET="${DATASET_INPUT:-$DEFAULT_DATASET}"
   echo "Dataset path: $DATASET"
 
+  TRAINING_CONFIG="${TRAINING_CONFIG_INPUT:-$DEFAULT_TRAINING_CONFIG}"
+  echo "Training config: $TRAINING_CONFIG"
+
   local training_mode="${TRAINING_MODE_INPUT:-t2v}"
   echo "Training task: $training_mode"
   training_mode=${training_mode,,}
@@ -669,6 +681,7 @@ main() {
   UPLOAD_CLOUD=$(normalize_yes_no "$UPLOAD_CLOUD")
   SHUTDOWN_INSTANCE=$(normalize_yes_no "$SHUTDOWN_INSTANCE")
   echo "  Dataset: $DATASET"
+  echo "  Training config: $TRAINING_CONFIG"
   if (( RUN_HIGH )); then
     echo "  High title: $HIGH_TITLE"
   else
@@ -715,6 +728,7 @@ main() {
     require "$LOW_DIT"
   fi
   require "$DATASET"
+  require "$TRAINING_CONFIG"
 
   cd "$MUSUBI_DIR"
 
@@ -739,6 +753,28 @@ main() {
   echo "Using CPU parameters:"
   echo "  --num_cpu_threads_per_process: $CPU_THREADS_PER_PROCESS"
   echo "  --max_data_loader_n_workers: $MAX_DATA_LOADER_WORKERS"
+
+  local -a ATTENTION_ARGS=()
+  local -a FP8_BASE_ARGS=()
+  read -r -a ATTENTION_ARGS <<< "$ATTN_FLAGS"
+  if [[ -n "$FP8_BASE_FLAG" ]]; then
+    read -r -a FP8_BASE_ARGS <<< "$FP8_BASE_FLAG"
+  fi
+
+  # Musubi loads stable hyperparameters from TOML. These command-line values
+  # are intentionally limited to per-run WebUI choices and runtime paths.
+  local -a TRAINING_BASE_ARGS=(
+    --config_file "$TRAINING_CONFIG"
+    --task "$TRAIN_TASK"
+    --vae "$VAE"
+    --t5 "$T5"
+    --dataset_config "$DATASET"
+    --max_data_loader_n_workers "$MAX_DATA_LOADER_WORKERS"
+    --max_train_epochs "$MAX_EPOCHS"
+    --save_every_n_epochs "$SAVE_EVERY"
+    --output_dir "$MUSUBI_DIR/output"
+    --metadata_author "$AUTHOR"
+  )
 
   echo "Caching latents..."
   local CACHE_LATENTS_CMD=(
@@ -788,39 +824,14 @@ main() {
     echo "Starting COMBINED on GPU $COMBINED_GPU (port $COMBINED_PORT) -> run_high.log"
     MASTER_ADDR=127.0.0.1 MASTER_PORT="$COMBINED_PORT" CUDA_VISIBLE_DEVICES="$COMBINED_GPU" \
     "$ACCELERATE" launch --num_cpu_threads_per_process "$CPU_THREADS_PER_PROCESS" --num_processes 1 --main_process_port "$COMBINED_PORT" src/musubi_tuner/wan_train_network.py \
-      --task "$TRAIN_TASK" \
+      "${TRAINING_BASE_ARGS[@]}" \
       --dit "$LOW_DIT" \
       --dit_high_noise "$HIGH_DIT" \
-      --vae "$VAE" \
-      --t5 "$T5" \
-      --dataset_config "$DATASET" \
-      $ATTN_FLAGS \
+      "${ATTENTION_ARGS[@]}" \
       --offload_inactive_dit \
-      --mixed_precision fp16 \
-      $FP8_BASE_FLAG \
-      --optimizer_type adamw \
-      --learning_rate 3e-4 \
-      --gradient_checkpointing \
-      --gradient_accumulation_steps 1 \
-      --max_data_loader_n_workers "$MAX_DATA_LOADER_WORKERS" \
-      --network_module networks.lora_wan \
-      --network_dim 16 \
-      --network_alpha 16 \
-      --timestep_sampling shift \
-      --discrete_flow_shift 1.0 \
-      --max_train_epochs "$MAX_EPOCHS" \
-      --save_every_n_epochs "$SAVE_EVERY" \
-      --seed 5 \
-      --optimizer_args weight_decay=0.1 \
-      --max_grad_norm 0 \
-      --lr_scheduler polynomial \
-      --lr_scheduler_power 8 \
-      --lr_scheduler_min_lr_ratio=5e-5 \
-      --output_dir "$MUSUBI_DIR/output" \
+      "${FP8_BASE_ARGS[@]}" \
       --output_name "$COMBINED_TITLE" \
       --metadata_title "$COMBINED_TITLE" \
-      --metadata_author "$AUTHOR" \
-      --preserve_distribution_shape \
       --min_timestep 0 \
       --max_timestep 1000 \
       --timestep_boundary "$TIMESTEP_BOUNDARY" \
@@ -835,37 +846,12 @@ main() {
     echo "Starting HIGH on GPU $HIGH_GPU (port $HIGH_PORT) -> run_high.log"
     MASTER_ADDR=127.0.0.1 MASTER_PORT="$HIGH_PORT" CUDA_VISIBLE_DEVICES="$HIGH_GPU" \
     "$ACCELERATE" launch --num_cpu_threads_per_process "$CPU_THREADS_PER_PROCESS" --num_processes 1 --main_process_port "$HIGH_PORT" src/musubi_tuner/wan_train_network.py \
-      --task "$TRAIN_TASK" \
+      "${TRAINING_BASE_ARGS[@]}" \
       --dit "$HIGH_DIT" \
-      --vae "$VAE" \
-      --t5 "$T5" \
-      --dataset_config "$DATASET" \
-      $ATTN_FLAGS \
-      --mixed_precision fp16 \
-      $FP8_BASE_FLAG \
-      --optimizer_type adamw \
-      --learning_rate 3e-4 \
-      --gradient_checkpointing \
-      --gradient_accumulation_steps 1 \
-      --max_data_loader_n_workers "$MAX_DATA_LOADER_WORKERS" \
-      --network_module networks.lora_wan \
-      --network_dim 16 \
-      --network_alpha 16 \
-      --timestep_sampling shift \
-      --discrete_flow_shift 1.0 \
-      --max_train_epochs "$MAX_EPOCHS" \
-      --save_every_n_epochs "$SAVE_EVERY" \
-      --seed 5 \
-      --optimizer_args weight_decay=0.1 \
-      --max_grad_norm 0 \
-      --lr_scheduler polynomial \
-      --lr_scheduler_power 8 \
-      --lr_scheduler_min_lr_ratio=5e-5 \
-      --output_dir "$MUSUBI_DIR/output" \
+      "${ATTENTION_ARGS[@]}" \
+      "${FP8_BASE_ARGS[@]}" \
       --output_name "$HIGH_TITLE" \
       --metadata_title "$HIGH_TITLE" \
-      --metadata_author "$AUTHOR" \
-      --preserve_distribution_shape \
       --min_timestep "$TIMESTEP_BOUNDARY" \
       --max_timestep 1000 \
       > "$PWD/run_high.log" 2>&1 &
@@ -887,37 +873,12 @@ main() {
     echo "Starting LOW on GPU $LOW_GPU (port $LOW_PORT) -> run_low.log"
     MASTER_ADDR=127.0.0.1 MASTER_PORT="$LOW_PORT" CUDA_VISIBLE_DEVICES="$LOW_GPU" \
     "$ACCELERATE" launch --num_cpu_threads_per_process "$CPU_THREADS_PER_PROCESS" --num_processes 1 --main_process_port "$LOW_PORT" src/musubi_tuner/wan_train_network.py \
-      --task "$TRAIN_TASK" \
+      "${TRAINING_BASE_ARGS[@]}" \
       --dit "$LOW_DIT" \
-      --vae "$VAE" \
-      --t5 "$T5" \
-      --dataset_config "$DATASET" \
-      $ATTN_FLAGS \
-      --mixed_precision fp16 \
-      $FP8_BASE_FLAG \
-      --optimizer_type adamw \
-      --learning_rate 3e-4 \
-      --gradient_checkpointing \
-      --gradient_accumulation_steps 1 \
-      --max_data_loader_n_workers "$MAX_DATA_LOADER_WORKERS" \
-      --network_module networks.lora_wan \
-      --network_dim 16 \
-      --network_alpha 16 \
-      --timestep_sampling shift \
-      --discrete_flow_shift 1.0 \
-      --max_train_epochs "$MAX_EPOCHS" \
-      --save_every_n_epochs "$SAVE_EVERY" \
-      --seed 5 \
-      --optimizer_args weight_decay=0.1 \
-      --max_grad_norm 0 \
-      --lr_scheduler polynomial \
-      --lr_scheduler_power 8 \
-      --lr_scheduler_min_lr_ratio=5e-5 \
-      --output_dir "$MUSUBI_DIR/output" \
+      "${ATTENTION_ARGS[@]}" \
+      "${FP8_BASE_ARGS[@]}" \
       --output_name "$LOW_TITLE" \
       --metadata_title "$LOW_TITLE" \
-      --metadata_author "$AUTHOR" \
-      --preserve_distribution_shape \
       --min_timestep 0 \
       --max_timestep "$TIMESTEP_BOUNDARY" \
       > "$PWD/run_low.log" 2>&1 &

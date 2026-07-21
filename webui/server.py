@@ -23,6 +23,7 @@ from .config import (
     REPO_ROOT,
     RUN_SCRIPT,
     TOKEN_ENV_VAR,
+    TRAINING_CONFIG_PATH,
     WEBUI_LOG,
 )
 from .dataset import (
@@ -95,6 +96,13 @@ async def jupyter_info() -> Dict[str, Optional[str]]:
     base_url = build_jupyter_base_url()
     token = os.environ.get(TOKEN_ENV_VAR) or AUTH_TOKEN
     return {"base_url": base_url, "token": token}
+
+
+@app.get("/training-config")
+async def training_config() -> Dict[str, str]:
+    if not TRAINING_CONFIG_PATH.is_file():
+        raise HTTPException(status_code=500, detail="Training configuration file not found")
+    return {"path": str(TRAINING_CONFIG_PATH)}
 
 
 @app.get("/dataset-configs")

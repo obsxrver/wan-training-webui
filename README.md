@@ -72,6 +72,11 @@ Set your parameters in the "Configure training" section:
     - **High / Low Only:** Train specific noise levels.
 - **Cloud Upload:** Check this to save results to your Vast.AI cloud storage (requires API key).
 
+Advanced Musubi Tuner parameters such as learning rate, optimizer, LoRA rank, and scheduler live in
+`/workspace/wan-training-webui/training-configs/wan22_lora.toml`. Use **Edit training config in Jupyter** in the WebUI to change them.
+The small set of run-specific WebUI fields override matching TOML values. See Musubi Tuner's
+[advanced configuration guide](https://github.com/kohya-ss/musubi-tuner/blob/main/docs/advanced_config.md) for supported options.
+
 ### 3. Launch
 Click **"Start training"**. The WebUI will:
 1.  Cache text encoder outputs and VAE latents.

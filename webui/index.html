@@ -915,6 +915,18 @@
             </label>
           </div>
           <div class="form-row">
+            <label>
+              Advanced training parameters
+              <div class="dataset-config-actions">
+                <button type="button" id="editTrainingConfigButton" class="button-inline">Edit training config in Jupyter</button>
+              </div>
+              <div class="status-note">
+                Learning rate, optimizer, LoRA rank, scheduler, and other advanced Musubi options are stored in an editable TOML file.
+                The fields on this page override matching values for each run.
+              </div>
+            </label>
+          </div>
+          <div class="form-row">
             <fieldset class="mode-fieldset">
               <legend>Task</legend>
               <div class="mode-options" role="radiogroup" aria-label="Training task">
@@ -1119,7 +1131,9 @@
       const FORM_STORAGE_KEY = 'wan-training-form-data';
       const DATASET_CONFIG_CUSTOM_VALUE = '__custom__';
       const DATASET_CONFIG_DIR = '/workspace/wan-training-webui/dataset-configs';
+      const editTrainingConfigButton = document.getElementById('editTrainingConfigButton');
       let jupyterInfo = null;
+      let trainingConfigPath = null;
       let datasetConfigOptions = [];
       let currentCloudStatus = null;
       let trainingRunning = false;
@@ -1380,6 +1394,33 @@
         const editUrl = `${info.base_url}/edit/${encodedPath}?token=${encodeURIComponent(info.token)}`;
         window.open(editUrl, '_blank');
         messageEl.textContent = 'Opening config in Jupyter…';
+      }
+
+      async function loadTrainingConfigPath() {
+        if (trainingConfigPath !== null) {
+          return trainingConfigPath;
+        }
+        const response = await fetch('/training-config');
+        if (!response.ok) {
+          const error = await response.json().catch(() => ({}));
+          throw new Error(error.detail || 'Training configuration is unavailable.');
+        }
+        const data = await response.json();
+        trainingConfigPath = data.path || '';
+        return trainingConfigPath;
+      }
+
+      async function openTrainingConfigInJupyter() {
+        const [info, configPath] = await Promise.all([loadJupyterInfo(), loadTrainingConfigPath()]);
+        if (!info || !info.base_url || !info.token) {
+          throw new Error('Jupyter connection info is unavailable.');
+        }
+        if (!configPath) {
+          throw new Error('Training configuration is unavailable.');
+        }
+        const editUrl = `${info.base_url}/edit/${encodeURI(configPath)}?token=${encodeURIComponent(info.token)}`;
+        window.open(editUrl, '_blank');
+        setMessage('Opening training config in Jupyter...');
       }
 
       function syncDatasetSelection(value, defaultPath) {
@@ -2479,6 +2520,12 @@
       if (editDatasetConfigButton) {
         editDatasetConfigButton.addEventListener('click', () => {
           openDatasetConfigInJupyter().catch((error) => console.warn('Unable to open config in Jupyter', error));
+        });
+      }
+
+      if (editTrainingConfigButton) {
+        editTrainingConfigButton.addEventListener('click', () => {
+          openTrainingConfigInJupyter().catch((error) => setMessage(error.message || 'Unable to open training config.', true));
         });
       }
 
