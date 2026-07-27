@@ -84,6 +84,34 @@ def normalize_early_stop_epochs(payload: TrainRequest) -> Dict[str, Optional[int
     return early_stop_epochs
 
 
+def normalize_optimizer_state_paths(payload: TrainRequest) -> None:
+    active_fields = {
+        "resume_high_optimizer_state": payload.noise_mode in {"both", "high", "combined"},
+        "resume_low_optimizer_state": payload.noise_mode in {"both", "low"},
+    }
+    labels = {
+        "resume_high_optimizer_state": "High/combined optimizer state",
+        "resume_low_optimizer_state": "Low optimizer state",
+    }
+
+    for field_name, active in active_fields.items():
+        raw_path = getattr(payload, field_name)
+        if not active or not raw_path or not raw_path.strip():
+            setattr(payload, field_name, None)
+            continue
+
+        state_path = Path(raw_path.strip()).expanduser()
+        if not state_path.is_absolute():
+            state_path = REPO_ROOT / state_path
+        state_path = state_path.resolve()
+        if not state_path.is_dir():
+            raise HTTPException(
+                status_code=400,
+                detail=f"{labels[field_name]} directory not found: {state_path}",
+            )
+        setattr(payload, field_name, str(state_path))
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index() -> str:
     if not INDEX_HTML_PATH.exists():
@@ -251,6 +279,7 @@ async def start_training(payload: TrainRequest) -> Dict[str, str]:
         raise HTTPException(status_code=409, detail="Training already in progress")
 
     early_stop_epochs = normalize_early_stop_epochs(payload)
+    normalize_optimizer_state_paths(payload)
 
     download_status = get_download_status()
     if download_status.get("pending"):

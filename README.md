@@ -77,6 +77,13 @@ Advanced Musubi Tuner parameters such as learning rate, optimizer, LoRA rank, an
 The small set of run-specific WebUI fields override matching TOML values. See Musubi Tuner's
 [advanced configuration guide](https://github.com/kohya-ss/musubi-tuner/blob/main/docs/advanced_config.md) for supported options.
 
+To make a run resumable, enable **Save optimizer state with checkpoints and at training end**. This saves
+Musubi's full training state alongside the LoRA checkpoints. To continue later, enter the generated
+`*-state*` directory in the appropriate High/Combined or Low optimizer state field. High and low paths
+are separate because **Both** launches two independent training processes. When resuming, set **Max epochs**
+to the total target epoch, including the epochs already completed. Reusing a title is safe; the new output
+directory receives the next available numeric suffix instead of overwriting or nesting into the earlier run.
+
 ### 3. Launch
 Click **"Start training"**. The WebUI will:
 1.  Cache text encoder outputs and VAE latents.

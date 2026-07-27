@@ -27,6 +27,9 @@ AUTHOR_INPUT="${WAN_AUTHOR:-}"
 DATASET_INPUT="${WAN_DATASET_PATH:-}"
 TRAINING_CONFIG_INPUT="${WAN_TRAINING_CONFIG_PATH:-}"
 SAVE_EVERY_INPUT="${WAN_SAVE_EVERY:-}"
+SAVE_OPTIMIZER_STATE_INPUT="${WAN_SAVE_OPTIMIZER_STATE:-}"
+RESUME_HIGH_OPTIMIZER_STATE_INPUT="${WAN_RESUME_HIGH_OPTIMIZER_STATE_PATH:-}"
+RESUME_LOW_OPTIMIZER_STATE_INPUT="${WAN_RESUME_LOW_OPTIMIZER_STATE_PATH:-}"
 MAX_EPOCHS_INPUT="${WAN_MAX_EPOCHS:-}"
 CPU_THREADS_INPUT="${WAN_CPU_THREADS_PER_PROCESS:-}"
 MAX_WORKERS_INPUT="${WAN_MAX_DATA_LOADER_WORKERS:-}"
@@ -48,6 +51,11 @@ Optional arguments (defaults are used when omitted):
   --dataset PATH                   Path to dataset configuration toml
   --training-config PATH           Path to Musubi training configuration toml
   --save-every N                   Save every N epochs
+  --save-optimizer-state [Y|N]     Save optimizer state with checkpoints and at training end
+  --resume-high-optimizer-state PATH
+                                    Resume high/combined training from a state directory
+  --resume-low-optimizer-state PATH
+                                    Resume low training from a state directory
   --max-epochs N                   Maximum epochs to train
   --cpu-threads-per-process N      Number of CPU threads per process
   --max-data-loader-workers N      Data loader workers
@@ -62,7 +70,8 @@ Optional arguments (defaults are used when omitted):
 
 Environment variable overrides:
   WAN_TITLE_PREFIX, WAN_AUTHOR, WAN_DATASET_PATH, WAN_TRAINING_CONFIG_PATH,
-  WAN_SAVE_EVERY,
+  WAN_SAVE_EVERY, WAN_SAVE_OPTIMIZER_STATE,
+  WAN_RESUME_HIGH_OPTIMIZER_STATE_PATH, WAN_RESUME_LOW_OPTIMIZER_STATE_PATH,
   WAN_MAX_EPOCHS, WAN_CPU_THREADS_PER_PROCESS, WAN_MAX_DATA_LOADER_WORKERS,
   WAN_UPLOAD_CLOUD, WAN_SHUTDOWN_INSTANCE, WAN_TRAINING_MODE,
   WAN_NOISE_MODE, WAN_CLOUD_CONNECTION_ID
@@ -103,6 +112,18 @@ while [[ $# -gt 0 ]]; do
       ;;
     --save-every)
       SAVE_EVERY_INPUT="$2"
+      shift 2
+      ;;
+    --save-optimizer-state)
+      SAVE_OPTIMIZER_STATE_INPUT="$2"
+      shift 2
+      ;;
+    --resume-high-optimizer-state)
+      RESUME_HIGH_OPTIMIZER_STATE_INPUT="$2"
+      shift 2
+      ;;
+    --resume-low-optimizer-state)
+      RESUME_LOW_OPTIMIZER_STATE_INPUT="$2"
       shift 2
       ;;
     --max-epochs)
@@ -223,6 +244,13 @@ fi
 require() {
   if [[ ! -f "$1" ]]; then
     echo "Missing required file: $1" >&2
+    exit 1
+  fi
+}
+
+require_dir() {
+  if [[ ! -d "$1" ]]; then
+    echo "Missing required directory: $1" >&2
     exit 1
   fi
 }
@@ -661,6 +689,18 @@ main() {
   SAVE_EVERY="${SAVE_EVERY_INPUT:-20}"
   echo "Save every N epochs: $SAVE_EVERY"
 
+  SAVE_OPTIMIZER_STATE="${SAVE_OPTIMIZER_STATE_INPUT:-N}"
+  SAVE_OPTIMIZER_STATE=$(normalize_yes_no "$SAVE_OPTIMIZER_STATE")
+  case "$SAVE_OPTIMIZER_STATE" in
+    Y|N) ;;
+    *)
+      echo "Invalid save optimizer state option: $SAVE_OPTIMIZER_STATE. Use 'Y' or 'N'." >&2
+      exit 1
+      ;;
+  esac
+  RESUME_HIGH_OPTIMIZER_STATE="${RESUME_HIGH_OPTIMIZER_STATE_INPUT:-}"
+  RESUME_LOW_OPTIMIZER_STATE="${RESUME_LOW_OPTIMIZER_STATE_INPUT:-}"
+
   MAX_EPOCHS="${MAX_EPOCHS_INPUT:-100}"
   echo "Max epochs: $MAX_EPOCHS"
 
@@ -700,6 +740,13 @@ main() {
   echo "  Author:     $AUTHOR"
   echo "  Max epochs: $MAX_EPOCHS"
   echo "  Save every: $SAVE_EVERY epochs"
+  echo "  Save optimizer state: $SAVE_OPTIMIZER_STATE"
+  if (( RUN_HIGH || RUN_COMBINED )) && [[ -n "$RESUME_HIGH_OPTIMIZER_STATE" ]]; then
+    echo "  Resume high/combined state: $RESUME_HIGH_OPTIMIZER_STATE"
+  fi
+  if (( RUN_LOW )) && [[ -n "$RESUME_LOW_OPTIMIZER_STATE" ]]; then
+    echo "  Resume low state: $RESUME_LOW_OPTIMIZER_STATE"
+  fi
   echo "  Task:       $TRAIN_TASK"
   echo "  Mode:       ${training_mode^^}"
   echo "  Noise mode: ${noise_mode^^}"
@@ -729,6 +776,14 @@ main() {
   fi
   require "$DATASET"
   require "$TRAINING_CONFIG"
+  if (( RUN_HIGH || RUN_COMBINED )) && [[ -n "$RESUME_HIGH_OPTIMIZER_STATE" ]]; then
+    require_dir "$RESUME_HIGH_OPTIMIZER_STATE"
+    RESUME_HIGH_OPTIMIZER_STATE="$(cd -- "$RESUME_HIGH_OPTIMIZER_STATE" && pwd)"
+  fi
+  if (( RUN_LOW )) && [[ -n "$RESUME_LOW_OPTIMIZER_STATE" ]]; then
+    require_dir "$RESUME_LOW_OPTIMIZER_STATE"
+    RESUME_LOW_OPTIMIZER_STATE="$(cd -- "$RESUME_LOW_OPTIMIZER_STATE" && pwd)"
+  fi
 
   cd "$MUSUBI_DIR"
 
@@ -756,9 +811,21 @@ main() {
 
   local -a ATTENTION_ARGS=()
   local -a FP8_BASE_ARGS=()
+  local -a SAVE_STATE_ARGS=()
+  local -a HIGH_RESUME_ARGS=()
+  local -a LOW_RESUME_ARGS=()
   read -r -a ATTENTION_ARGS <<< "$ATTN_FLAGS"
   if [[ -n "$FP8_BASE_FLAG" ]]; then
     read -r -a FP8_BASE_ARGS <<< "$FP8_BASE_FLAG"
+  fi
+  if [[ "$SAVE_OPTIMIZER_STATE" == "Y" ]]; then
+    SAVE_STATE_ARGS+=(--save_state --save_state_on_train_end)
+  fi
+  if [[ -n "$RESUME_HIGH_OPTIMIZER_STATE" ]]; then
+    HIGH_RESUME_ARGS+=(--resume "$RESUME_HIGH_OPTIMIZER_STATE")
+  fi
+  if [[ -n "$RESUME_LOW_OPTIMIZER_STATE" ]]; then
+    LOW_RESUME_ARGS+=(--resume "$RESUME_LOW_OPTIMIZER_STATE")
   fi
 
   # Musubi loads stable hyperparameters from TOML. These command-line values
@@ -774,6 +841,7 @@ main() {
     --save_every_n_epochs "$SAVE_EVERY"
     --output_dir "$MUSUBI_DIR/output"
     --metadata_author "$AUTHOR"
+    "${SAVE_STATE_ARGS[@]}"
   )
 
   echo "Caching latents..."
@@ -830,6 +898,7 @@ main() {
       "${ATTENTION_ARGS[@]}" \
       --offload_inactive_dit \
       "${FP8_BASE_ARGS[@]}" \
+      "${HIGH_RESUME_ARGS[@]}" \
       --output_name "$COMBINED_TITLE" \
       --metadata_title "$COMBINED_TITLE" \
       --min_timestep 0 \
@@ -850,6 +919,7 @@ main() {
       --dit "$HIGH_DIT" \
       "${ATTENTION_ARGS[@]}" \
       "${FP8_BASE_ARGS[@]}" \
+      "${HIGH_RESUME_ARGS[@]}" \
       --output_name "$HIGH_TITLE" \
       --metadata_title "$HIGH_TITLE" \
       --min_timestep "$TIMESTEP_BOUNDARY" \
@@ -877,6 +947,7 @@ main() {
       --dit "$LOW_DIT" \
       "${ATTENTION_ARGS[@]}" \
       "${FP8_BASE_ARGS[@]}" \
+      "${LOW_RESUME_ARGS[@]}" \
       --output_name "$LOW_TITLE" \
       --metadata_title "$LOW_TITLE" \
       --min_timestep 0 \
@@ -928,8 +999,17 @@ main() {
   echo "✅ Training completed!"
 
   OUTPUT_DIR="$MUSUBI_DIR/output"
-  RENAMED_OUTPUT="$MUSUBI_DIR/output-${TITLE_PREFIX}"
+  RENAMED_OUTPUT_BASE="$MUSUBI_DIR/output-${TITLE_PREFIX}"
+  RENAMED_OUTPUT="$RENAMED_OUTPUT_BASE"
+  OUTPUT_SUFFIX=2
+  while [[ -e "$RENAMED_OUTPUT" ]]; do
+    RENAMED_OUTPUT="${RENAMED_OUTPUT_BASE}-${OUTPUT_SUFFIX}"
+    OUTPUT_SUFFIX=$((OUTPUT_SUFFIX + 1))
+  done
   if [[ -d "$OUTPUT_DIR" ]]; then
+    if [[ "$RENAMED_OUTPUT" != "$RENAMED_OUTPUT_BASE" ]]; then
+      echo "Output directory already exists; saving this run to $RENAMED_OUTPUT"
+    fi
     mv "$OUTPUT_DIR" "$RENAMED_OUTPUT"
   fi
   

@@ -10,6 +10,9 @@ class TrainRequest(BaseModel):
     author: str = Field(default="authorName", min_length=1)
     dataset_path: str = Field(default=str(DEFAULT_DATASET_CONFIG))
     save_every: int = Field(default=100, ge=1)
+    save_optimizer_state: bool = False
+    resume_high_optimizer_state: Optional[str] = None
+    resume_low_optimizer_state: Optional[str] = None
     max_epochs: int = Field(default=100, ge=1)
     early_stop_high_epoch: Optional[int] = Field(default=None, ge=1)
     early_stop_low_epoch: Optional[int] = Field(default=None, ge=1)

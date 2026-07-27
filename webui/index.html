@@ -985,6 +985,36 @@
               <input type="number" name="earlyStopLowEpoch" min="1" placeholder="Off" />
             </label>
           </div>
+          <div class="form-row">
+            <label class="toggle">
+              <input type="checkbox" name="saveOptimizerState" />
+              Save optimizer state with checkpoints and at training end
+            </label>
+            <div class="status-note">
+              Optimizer states use substantially more disk space than LoRA checkpoints. Resume from a generated state directory, not a .safetensors file.
+            </div>
+          </div>
+          <div class="form-row two-col">
+            <label id="resumeHighOptimizerStateLabel">
+              <span id="resumeHighOptimizerStateText">High optimizer state directory (optional)</span>
+              <input
+                type="text"
+                name="resumeHighOptimizerState"
+                placeholder="/workspace/musubi-tuner/output-name/...-state"
+              />
+            </label>
+            <label id="resumeLowOptimizerStateLabel">
+              Low optimizer state directory (optional)
+              <input
+                type="text"
+                name="resumeLowOptimizerState"
+                placeholder="/workspace/musubi-tuner/output-name/...-state"
+              />
+            </label>
+          </div>
+          <div class="status-note">
+            When resuming, Max epochs is the total target epoch, including epochs already completed.
+          </div>
           <div class="form-row two-col">
             <label class="toggle" id="uploadCloudToggle">
               <input type="checkbox" name="uploadCloud" checked />
@@ -1098,6 +1128,11 @@
       const earlyStopLowLabel = document.getElementById('earlyStopLowLabel');
       const earlyStopHighText = document.getElementById('earlyStopHighText');
       const earlyStopLowText = document.getElementById('earlyStopLowText');
+      const resumeHighOptimizerStateInput = form.querySelector('input[name="resumeHighOptimizerState"]');
+      const resumeLowOptimizerStateInput = form.querySelector('input[name="resumeLowOptimizerState"]');
+      const resumeHighOptimizerStateLabel = document.getElementById('resumeHighOptimizerStateLabel');
+      const resumeLowOptimizerStateLabel = document.getElementById('resumeLowOptimizerStateLabel');
+      const resumeHighOptimizerStateText = document.getElementById('resumeHighOptimizerStateText');
       const highStepEl = document.getElementById('highStep');
       const highLossEl = document.getElementById('highLoss');
       const highEpochEl = document.getElementById('highEpoch');
@@ -2268,6 +2303,7 @@
         const runs = value === 'high' ? ['high'] : value === 'low' ? ['low'] : value === 'combined' ? ['high'] : ['high', 'low'];
         updateActiveRuns(runs);
         updateEarlyStopControls(value || 'both');
+        updateOptimizerStateControls(value || 'both');
       }
 
       function setEarlyStopField(input, label, enabled) {
@@ -2290,6 +2326,26 @@
         }
         setEarlyStopField(earlyStopHighInput, earlyStopHighLabel, mode !== 'low');
         setEarlyStopField(earlyStopLowInput, earlyStopLowLabel, mode === 'both' || mode === 'low');
+      }
+
+      function updateOptimizerStateControls(noiseMode) {
+        const mode = (noiseMode || 'both').toLowerCase();
+        if (resumeHighOptimizerStateText) {
+          resumeHighOptimizerStateText.textContent =
+            mode === 'combined'
+              ? 'Combined optimizer state directory (optional)'
+              : 'High optimizer state directory (optional)';
+        }
+        setEarlyStopField(
+          resumeHighOptimizerStateInput,
+          resumeHighOptimizerStateLabel,
+          mode !== 'low',
+        );
+        setEarlyStopField(
+          resumeLowOptimizerStateInput,
+          resumeLowOptimizerStateLabel,
+          mode === 'both' || mode === 'low',
+        );
       }
 
       function setRunState(run, isActive, message = '') {
@@ -2353,6 +2409,7 @@
           const runs = value === 'high' ? ['high'] : value === 'low' ? ['low'] : value === 'combined' ? ['high'] : ['high', 'low'];
           updateActiveRuns(runs);
           updateEarlyStopControls(value || 'both');
+          updateOptimizerStateControls(value || 'both');
           saveFormState();
         });
       });
@@ -2818,6 +2875,7 @@
             noiseInput.checked = true;
           }
           updateEarlyStopControls(snapshot.noise_mode);
+          updateOptimizerStateControls(snapshot.noise_mode);
         }
         if (syncRunConfig && snapshot.early_stop_epochs) {
           if (earlyStopHighInput) {
@@ -2862,6 +2920,11 @@
           author: (formData.get('author') || '').toString().trim() || 'authorName',
           dataset_path: (formData.get('datasetPath') || '').toString().trim(),
           save_every: Number(formData.get('saveEvery')) || 100,
+          save_optimizer_state: formData.get('saveOptimizerState') === 'on',
+          resume_high_optimizer_state:
+            (formData.get('resumeHighOptimizerState') || '').toString().trim() || null,
+          resume_low_optimizer_state:
+            (formData.get('resumeLowOptimizerState') || '').toString().trim() || null,
           max_epochs: maxEpochs,
           early_stop_high_epoch: earlyStopHighEpoch,
           early_stop_low_epoch: earlyStopLowEpoch,

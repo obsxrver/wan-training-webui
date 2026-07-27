@@ -252,6 +252,16 @@ def build_command(payload: TrainRequest) -> List[str]:
     args.extend(["--author", payload.author])
     args.extend(["--dataset", payload.dataset_path])
     args.extend(["--save-every", str(payload.save_every)])
+    if payload.save_optimizer_state:
+        args.extend(["--save-optimizer-state", "Y"])
+    if payload.resume_high_optimizer_state:
+        resume_path = payload.resume_high_optimizer_state.strip()
+        if resume_path:
+            args.extend(["--resume-high-optimizer-state", resume_path])
+    if payload.resume_low_optimizer_state:
+        resume_path = payload.resume_low_optimizer_state.strip()
+        if resume_path:
+            args.extend(["--resume-low-optimizer-state", resume_path])
     args.extend(["--max-epochs", str(payload.max_epochs)])
     if payload.cpu_threads_per_process is not None:
         args.extend(["--cpu-threads-per-process", str(payload.cpu_threads_per_process)])
