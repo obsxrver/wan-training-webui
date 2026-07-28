@@ -28,11 +28,10 @@ fi
 cd musubi-tuner
 git fetch --all --tags --prune
 
-mkdir -p models/text_encoders models/vae models/diffusion_models
-mkdir -p /workspace/wan-training-webui/dataset-configs
+python3 /workspace/wan-training-webui/configure_training_hardware.py \
+  /workspace/wan-training-webui/training-configs/wan22_lora.toml
 
-curl -fsSL "https://raw.githubusercontent.com/obsxrver/wan-training-webui/main/dataset-configs/dataset.toml" -o /workspace/wan-training-webui/dataset-configs/dataset.toml
-curl -fsSL "https://raw.githubusercontent.com/obsxrver/wan-training-webui/main/dataset-configs/turbo.toml" -o /workspace/wan-training-webui/dataset-configs/turbo.toml
+mkdir -p models/text_encoders models/vae models/diffusion_models
 
 pip install -U "huggingface_hub>=0.20.0" --break-system-packages || \
 pip install -U huggingface_hub --break-system-packages || \

@@ -6,8 +6,8 @@
 # The WebUI/launcher supplies run-specific values on the command line, which
 # take precedence over matching values here: task, model and dataset paths,
 # output names, metadata author/title, max_train_epochs, save_every_n_epochs,
-# max_data_loader_n_workers, and timestep ranges. Attention, block swapping,
-# and fp8_base are also selected automatically for the available GPU.
+# and timestep ranges. Provisioning appends an auto-generated hardware section
+# with attention, block swapping, and fp8 settings for the detected GPU.
 
 [precision]
 mixed_precision = "fp16"
@@ -27,6 +27,7 @@ training_comment = "Created with Wan 2.2 LoRA Training WebUI: https://github.com
 [training]
 gradient_checkpointing = true
 gradient_accumulation_steps = 1
+max_data_loader_n_workers = 4
 seed = 5
 
 [timestep]

@@ -41,6 +41,9 @@ if [[ ! -d "$MUSUBI_DIR" ]]; then
   git clone --recursive https://github.com/kohya-ss/musubi-tuner.git "$MUSUBI_DIR"
 fi
 
+"$PYTHON_BIN" "$REPO_ROOT/configure_training_hardware.py" \
+  "$REPO_ROOT/training-configs/wan22_lora.toml"
+
 if [[ ! -d "$VENV_DIR" ]]; then
   "$PYTHON_BIN" -m venv "$VENV_DIR"
 fi

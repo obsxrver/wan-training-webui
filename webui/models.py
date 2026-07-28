@@ -16,8 +16,6 @@ class TrainRequest(BaseModel):
     max_epochs: int = Field(default=100, ge=1)
     early_stop_high_epoch: Optional[int] = Field(default=None, ge=1)
     early_stop_low_epoch: Optional[int] = Field(default=None, ge=1)
-    cpu_threads_per_process: Optional[int] = Field(default=None, ge=1)
-    max_data_loader_workers: Optional[int] = Field(default=None, ge=1)
     upload_cloud: bool = True
     shutdown_instance: bool = True
     auto_confirm: bool = True

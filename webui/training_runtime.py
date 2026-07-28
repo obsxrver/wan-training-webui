@@ -263,10 +263,6 @@ def build_command(payload: TrainRequest) -> List[str]:
         if resume_path:
             args.extend(["--resume-low-optimizer-state", resume_path])
     args.extend(["--max-epochs", str(payload.max_epochs)])
-    if payload.cpu_threads_per_process is not None:
-        args.extend(["--cpu-threads-per-process", str(payload.cpu_threads_per_process)])
-    if payload.max_data_loader_workers is not None:
-        args.extend(["--max-data-loader-workers", str(payload.max_data_loader_workers)])
     args.extend(["--upload-cloud", "Y" if payload.upload_cloud else "N"])
     args.extend(["--shutdown-instance", "Y" if payload.shutdown_instance else "N"])
     args.extend(["--mode", payload.training_mode])

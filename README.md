@@ -74,6 +74,8 @@ Set your parameters in the "Configure training" section:
 
 Advanced Musubi Tuner parameters such as learning rate, optimizer, LoRA rank, and scheduler live in
 `/workspace/wan-training-webui/training-configs/wan22_lora.toml`. Use **Edit training config in Jupyter** in the WebUI to change them.
+Provisioning also writes an auto-generated hardware preset there based on the detected GPU VRAM. The preset
+uses SDPA, enables one swapped block below 33 GiB, and enables the fp8 base model below 60 GiB.
 The small set of run-specific WebUI fields override matching TOML values. See Musubi Tuner's
 [advanced configuration guide](https://github.com/kohya-ss/musubi-tuner/blob/main/docs/advanced_config.md) for supported options.
 

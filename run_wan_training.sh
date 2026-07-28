@@ -14,6 +14,7 @@ DEFAULT_DATASET="/workspace/wan-training-webui/dataset-configs/dataset.toml"
 DEFAULT_TRAINING_CONFIG="$SCRIPT_DIR/training-configs/wan22_lora.toml"
 PYTHON="/venv/main/bin/python"
 ACCELERATE="/venv/main/bin/accelerate" #todo install in provisioning if errors
+ACCELERATE_CPU_THREADS_PER_PROCESS=4
 VAE="$MUSUBI_DIR/models/vae/split_files/vae/wan_2.1_vae.safetensors"
 T5="$MUSUBI_DIR/models/text_encoders/models_t5_umt5-xxl-enc-bf16.pth"
 T2V_HIGH_DIT="$MUSUBI_DIR/models/diffusion_models/split_files/diffusion_models/wan2.2_t2v_high_noise_14B_fp16.safetensors"
@@ -31,15 +32,12 @@ SAVE_OPTIMIZER_STATE_INPUT="${WAN_SAVE_OPTIMIZER_STATE:-}"
 RESUME_HIGH_OPTIMIZER_STATE_INPUT="${WAN_RESUME_HIGH_OPTIMIZER_STATE_PATH:-}"
 RESUME_LOW_OPTIMIZER_STATE_INPUT="${WAN_RESUME_LOW_OPTIMIZER_STATE_PATH:-}"
 MAX_EPOCHS_INPUT="${WAN_MAX_EPOCHS:-}"
-CPU_THREADS_INPUT="${WAN_CPU_THREADS_PER_PROCESS:-}"
-MAX_WORKERS_INPUT="${WAN_MAX_DATA_LOADER_WORKERS:-}"
 CLI_UPLOAD_CLOUD="${WAN_UPLOAD_CLOUD:-}"
 CLI_SHUTDOWN_INSTANCE="${WAN_SHUTDOWN_INSTANCE:-}"
 TRAINING_MODE_INPUT="${WAN_TRAINING_MODE:-}"
 NOISE_MODE_INPUT="${WAN_NOISE_MODE:-}"
 CLI_CLOUD_CONNECTION_ID="${WAN_CLOUD_CONNECTION_ID:-}"
 AUTO_CONFIRM=0
-CPU_THREAD_SOURCE=""
 
 print_usage() {
   cat <<'EOF'
@@ -57,8 +55,6 @@ Optional arguments (defaults are used when omitted):
   --resume-low-optimizer-state PATH
                                     Resume low training from a state directory
   --max-epochs N                   Maximum epochs to train
-  --cpu-threads-per-process N      Number of CPU threads per process
-  --max-data-loader-workers N      Data loader workers
   --upload-cloud [Y|N]             Upload outputs to configured cloud storage
   --shutdown-instance [Y|N]        Shut down Vast.ai instance after training
   --mode [t2v|i2v]                 Select the training task (text-to-video or image-to-video)
@@ -72,9 +68,8 @@ Environment variable overrides:
   WAN_TITLE_PREFIX, WAN_AUTHOR, WAN_DATASET_PATH, WAN_TRAINING_CONFIG_PATH,
   WAN_SAVE_EVERY, WAN_SAVE_OPTIMIZER_STATE,
   WAN_RESUME_HIGH_OPTIMIZER_STATE_PATH, WAN_RESUME_LOW_OPTIMIZER_STATE_PATH,
-  WAN_MAX_EPOCHS, WAN_CPU_THREADS_PER_PROCESS, WAN_MAX_DATA_LOADER_WORKERS,
-  WAN_UPLOAD_CLOUD, WAN_SHUTDOWN_INSTANCE, WAN_TRAINING_MODE,
-  WAN_NOISE_MODE, WAN_CLOUD_CONNECTION_ID
+  WAN_MAX_EPOCHS, WAN_UPLOAD_CLOUD, WAN_SHUTDOWN_INSTANCE,
+  WAN_TRAINING_MODE, WAN_NOISE_MODE, WAN_CLOUD_CONNECTION_ID
 EOF
 }
 
@@ -128,14 +123,6 @@ while [[ $# -gt 0 ]]; do
       ;;
     --max-epochs)
       MAX_EPOCHS_INPUT="$2"
-      shift 2
-      ;;
-    --cpu-threads-per-process)
-      CPU_THREADS_INPUT="$2"
-      shift 2
-      ;;
-    --max-data-loader-workers)
-      MAX_WORKERS_INPUT="$2"
       shift 2
       ;;
     --upload-cloud)
@@ -308,138 +295,6 @@ s.close()
 PY
 }
 
-check_vram() {
-  # Get VRAM in MB for first GPU (assuming all GPUs are identical)
-  local vram_mb
-  vram_mb=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ' ')
-  if [[ -z "$vram_mb" || ! "$vram_mb" =~ ^[0-9]+$ ]]; then
-    echo "Warning: Could not detect GPU VRAM" >&2
-    return 1
-  fi
-
-  local vram_gb=$((vram_mb / 1024))
-  echo "Detected GPU VRAM: ${vram_gb}GB" >&2
-
-  echo "$vram_mb"
-}
-
-# block swap on anything under 33GB VRAM
-determine_attention_flags() {
-  local vram_mb="${1:-}"
-  if [[ -n "$vram_mb" && "$vram_mb" -lt $((33 * 1024)) ]]; then
-    echo "--sdpa --blocks_to_swap 1"
-    return
-  fi
-
-  echo "--sdpa"
-}
-
-determine_fp8_base_flag() {
-  local vram_mb="${1:-}"
-  if [[ -n "$vram_mb" && "$vram_mb" -lt $((60 * 1024)) ]]; then
-    echo "--fp8_base"
-  fi
-}
-
-get_vast_vcpus() {
-  local container_id
-  container_id=$(get_container_id || true)
-  if [[ -z "$container_id" ]]; then
-    return 1
-  fi
-
-  if ! command -v vastai >/dev/null 2>&1; then
-    return 1
-  fi
-
-  local result
-  result=$(python3 - "$container_id" <<'PY'
-import re
-import subprocess
-import sys
-
-container_id = sys.argv[1].strip()
-if not container_id:
-    sys.exit(1)
-
-try:
-    output = subprocess.check_output(
-        ["vastai", "show", "instance", container_id],
-        text=True,
-        stderr=subprocess.STDOUT,
-    )
-except Exception:
-    sys.exit(1)
-
-lines = [line.strip() for line in output.splitlines() if line.strip()]
-if len(lines) < 2:
-    sys.exit(1)
-
-header = re.split(r"\s{2,}", lines[0])
-column_names = {name.lower(): idx for idx, name in enumerate(header)}
-idx = None
-for key in ("vcpus", "vcpu", "cpu"):
-    if key in column_names:
-        idx = column_names[key]
-        break
-if idx is None:
-    sys.exit(1)
-
-for line in lines[1:]:
-    parts = re.split(r"\s{2,}", line)
-    if not parts:
-        continue
-    if parts[0] != container_id:
-        continue
-    try:
-        value = float(parts[idx])
-    except (IndexError, ValueError):
-        continue
-    print(int(value))
-    sys.exit(0)
-
-sys.exit(1)
-PY
-)
-  if [[ -n "$result" ]]; then
-    echo "$result"
-    return 0
-  fi
-
-  return 1
-}
-
-get_cpu_threads() {
-  local value
-
-  CPU_THREAD_SOURCE=""
-  if value=$(get_vast_vcpus 2>/dev/null); then
-    if [[ -n "$value" && "$value" =~ ^[0-9]+$ && "$value" -gt 0 ]]; then
-      CPU_THREAD_SOURCE="vastai show instance"
-      echo "$value"
-      return 0
-    fi
-  fi
-
-  value=$(nproc 2>/dev/null || true)
-  if [[ -n "$value" && "$value" =~ ^[0-9]+$ && "$value" -gt 0 ]]; then
-    CPU_THREAD_SOURCE="nproc"
-    echo "$value"
-    return 0
-  fi
-
-  value=$(grep -c ^processor /proc/cpuinfo 2>/dev/null || true)
-  if [[ -n "$value" && "$value" =~ ^[0-9]+$ && "$value" -gt 0 ]]; then
-    CPU_THREAD_SOURCE="/proc/cpuinfo"
-    echo "$value"
-    return 0
-  fi
-
-  CPU_THREAD_SOURCE=""
-  echo ""
-  return 1
-}
-
 setup_vast_api_key() {
   # Set up Vast.ai API key for instance management
   if (( ! VAST_INSTANCE )); then
@@ -547,39 +402,6 @@ shutdown_instance() {
     echo "❌ Failed to shutdown instance" >&2
     return 1
   fi
-}
-
-calculate_cpu_params() {
-  local threads
-  threads=$(get_cpu_threads)
-  local cpu_threads_per_process
-  local max_data_loader_workers
-
-  if [[ -n "$threads" && "$threads" =~ ^[0-9]+$ && "$threads" -gt 0 ]]; then
-    cpu_threads_per_process=$((threads / 4))
-    max_data_loader_workers=$cpu_threads_per_process
-
-    if [[ "$cpu_threads_per_process" -lt 1 ]]; then
-      cpu_threads_per_process=1
-    fi
-    if [[ "$max_data_loader_workers" -lt 1 ]]; then
-      max_data_loader_workers=1
-    fi
-
-    if [[ -n "$CPU_THREAD_SOURCE" ]]; then
-      echo "Detected $threads CPU threads via $CPU_THREAD_SOURCE." >&2
-    else
-      echo "Detected $threads CPU threads." >&2
-    fi
-    echo "Setting --num_cpu_threads_per_process=$cpu_threads_per_process" >&2
-    echo "Setting --max_data_loader_n_workers=$max_data_loader_workers" >&2
-  else
-    cpu_threads_per_process=8
-    max_data_loader_workers=8
-    echo "Could not determine CPU threads automatically; defaulting to 8 threads for training and data loading." >&2
-  fi
-
-  echo "$cpu_threads_per_process $max_data_loader_workers"
 }
 
 main() {
@@ -704,13 +526,6 @@ main() {
   MAX_EPOCHS="${MAX_EPOCHS_INPUT:-100}"
   echo "Max epochs: $MAX_EPOCHS"
 
-  CPU_PARAMS=($(calculate_cpu_params))
-  DEFAULT_CPU_THREADS_PER_PROCESS=${CPU_PARAMS[0]}
-  DEFAULT_MAX_DATA_LOADER_WORKERS=${CPU_PARAMS[1]}
-
-  CPU_THREADS_PER_PROCESS="${CPU_THREADS_INPUT:-$DEFAULT_CPU_THREADS_PER_PROCESS}"
-  MAX_DATA_LOADER_WORKERS="${MAX_WORKERS_INPUT:-$DEFAULT_MAX_DATA_LOADER_WORKERS}"
-
   echo ""
   echo "=== Post-Training Options ==="
   UPLOAD_CLOUD="${CLI_UPLOAD_CLOUD:-N}"
@@ -792,32 +607,14 @@ main() {
   rm -rf "$EARLY_STOP_MARKER_DIR"
   mkdir -p "$EARLY_STOP_MARKER_DIR"
 
-  local VRAM_MB
-  VRAM_MB=$(check_vram || true)
-  ATTN_FLAGS=$(determine_attention_flags "$VRAM_MB")
-  FP8_BASE_FLAG=$(determine_fp8_base_flag "$VRAM_MB")
-  echo "Using attention flags: $ATTN_FLAGS"
-  if [[ -n "$FP8_BASE_FLAG" ]]; then
-    echo "Using fp8 base flag: $FP8_BASE_FLAG"
-  else
-    echo "Using fp8 base flag: disabled"
-  fi
   local LOGDIR="$MUSUBI_DIR/logs"
   mkdir -p "$LOGDIR"
 
-  echo "Using CPU parameters:"
-  echo "  --num_cpu_threads_per_process: $CPU_THREADS_PER_PROCESS"
-  echo "  --max_data_loader_n_workers: $MAX_DATA_LOADER_WORKERS"
+  echo "Using --num_cpu_threads_per_process=$ACCELERATE_CPU_THREADS_PER_PROCESS"
 
-  local -a ATTENTION_ARGS=()
-  local -a FP8_BASE_ARGS=()
   local -a SAVE_STATE_ARGS=()
   local -a HIGH_RESUME_ARGS=()
   local -a LOW_RESUME_ARGS=()
-  read -r -a ATTENTION_ARGS <<< "$ATTN_FLAGS"
-  if [[ -n "$FP8_BASE_FLAG" ]]; then
-    read -r -a FP8_BASE_ARGS <<< "$FP8_BASE_FLAG"
-  fi
   if [[ "$SAVE_OPTIMIZER_STATE" == "Y" ]]; then
     SAVE_STATE_ARGS+=(--save_state --save_state_on_train_end)
   fi
@@ -836,7 +633,6 @@ main() {
     --vae "$VAE"
     --t5 "$T5"
     --dataset_config "$DATASET"
-    --max_data_loader_n_workers "$MAX_DATA_LOADER_WORKERS"
     --max_train_epochs "$MAX_EPOCHS"
     --save_every_n_epochs "$SAVE_EVERY"
     --output_dir "$MUSUBI_DIR/output"
@@ -891,13 +687,11 @@ main() {
     COMBINED_GPU=$(wait_for_free_gpu)
     echo "Starting COMBINED on GPU $COMBINED_GPU (port $COMBINED_PORT) -> run_high.log"
     MASTER_ADDR=127.0.0.1 MASTER_PORT="$COMBINED_PORT" CUDA_VISIBLE_DEVICES="$COMBINED_GPU" \
-    "$ACCELERATE" launch --num_cpu_threads_per_process "$CPU_THREADS_PER_PROCESS" --num_processes 1 --main_process_port "$COMBINED_PORT" src/musubi_tuner/wan_train_network.py \
+    "$ACCELERATE" launch --num_cpu_threads_per_process "$ACCELERATE_CPU_THREADS_PER_PROCESS" --num_processes 1 --main_process_port "$COMBINED_PORT" src/musubi_tuner/wan_train_network.py \
       "${TRAINING_BASE_ARGS[@]}" \
       --dit "$LOW_DIT" \
       --dit_high_noise "$HIGH_DIT" \
-      "${ATTENTION_ARGS[@]}" \
       --offload_inactive_dit \
-      "${FP8_BASE_ARGS[@]}" \
       "${HIGH_RESUME_ARGS[@]}" \
       --output_name "$COMBINED_TITLE" \
       --metadata_title "$COMBINED_TITLE" \
@@ -914,11 +708,9 @@ main() {
     HIGH_GPU=$(wait_for_free_gpu)
     echo "Starting HIGH on GPU $HIGH_GPU (port $HIGH_PORT) -> run_high.log"
     MASTER_ADDR=127.0.0.1 MASTER_PORT="$HIGH_PORT" CUDA_VISIBLE_DEVICES="$HIGH_GPU" \
-    "$ACCELERATE" launch --num_cpu_threads_per_process "$CPU_THREADS_PER_PROCESS" --num_processes 1 --main_process_port "$HIGH_PORT" src/musubi_tuner/wan_train_network.py \
+    "$ACCELERATE" launch --num_cpu_threads_per_process "$ACCELERATE_CPU_THREADS_PER_PROCESS" --num_processes 1 --main_process_port "$HIGH_PORT" src/musubi_tuner/wan_train_network.py \
       "${TRAINING_BASE_ARGS[@]}" \
       --dit "$HIGH_DIT" \
-      "${ATTENTION_ARGS[@]}" \
-      "${FP8_BASE_ARGS[@]}" \
       "${HIGH_RESUME_ARGS[@]}" \
       --output_name "$HIGH_TITLE" \
       --metadata_title "$HIGH_TITLE" \
@@ -942,11 +734,9 @@ main() {
     fi
     echo "Starting LOW on GPU $LOW_GPU (port $LOW_PORT) -> run_low.log"
     MASTER_ADDR=127.0.0.1 MASTER_PORT="$LOW_PORT" CUDA_VISIBLE_DEVICES="$LOW_GPU" \
-    "$ACCELERATE" launch --num_cpu_threads_per_process "$CPU_THREADS_PER_PROCESS" --num_processes 1 --main_process_port "$LOW_PORT" src/musubi_tuner/wan_train_network.py \
+    "$ACCELERATE" launch --num_cpu_threads_per_process "$ACCELERATE_CPU_THREADS_PER_PROCESS" --num_processes 1 --main_process_port "$LOW_PORT" src/musubi_tuner/wan_train_network.py \
       "${TRAINING_BASE_ARGS[@]}" \
       --dit "$LOW_DIT" \
-      "${ATTENTION_ARGS[@]}" \
-      "${FP8_BASE_ARGS[@]}" \
       "${LOW_RESUME_ARGS[@]}" \
       --output_name "$LOW_TITLE" \
       --metadata_title "$LOW_TITLE" \
