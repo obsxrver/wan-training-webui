@@ -33,17 +33,14 @@ python3 /workspace/wan-training-webui/configure_training_hardware.py \
 
 mkdir -p models/text_encoders models/vae models/diffusion_models
 
-pip install -U "huggingface_hub>=0.20.0" --break-system-packages || \
-pip install -U huggingface_hub --break-system-packages || \
-pip install -U huggingface_hub
+pip install -r /workspace/wan-training-webui/requirements.txt --break-system-packages || \
+pip install -r /workspace/wan-training-webui/requirements.txt
 
-#fix bug vastai introduced in latest image
-#TODO check if bug is patched and remove
-/usr/bin/python3 -m pip install rich
-
-if ! command -v vastai >/dev/null 2>&1; then
-  pip install vastai
-fi
+HF_DOWNLOAD_VENV=/venv/hf-download
+python3 -m venv "${HF_DOWNLOAD_VENV}"
+"${HF_DOWNLOAD_VENV}/bin/pip" install \
+  -r /workspace/wan-training-webui/requirements-hf-download.txt
+HF_DOWNLOAD="${HF_DOWNLOAD_VENV}/bin/hf"
 
 
 if [[ -n "${VASTAI_KEY:-}" ]]; then
@@ -55,10 +52,7 @@ fi
   set -euo pipefail
   cd /workspace/musubi-tuner
 
-  sudo apt-get update -y
-  
-  pip install -e .
-  pip install protobuf six matplotlib fastapi "uvicorn[standard]" python-multipart tomli torch torchvision
+  pip install -e . "huggingface_hub==0.34.3"
 ) & pids+=($!)
 
 
@@ -85,37 +79,37 @@ start_download() {
 
 echo "Starting model downloads in background..."
 start_download text_encoder \
-  hf download \
+  "${HF_DOWNLOAD}" download \
     Wan-AI/Wan2.1-I2V-14B-720P \
     models_t5_umt5-xxl-enc-bf16.pth \
     --local-dir models/text_encoders
 
 start_download vae \
-  hf download \
+  "${HF_DOWNLOAD}" download \
     Comfy-Org/Wan_2.1_ComfyUI_repackaged \
     split_files/vae/wan_2.1_vae.safetensors \
     --local-dir models/vae
 
 start_download diffusion_high_noise \
-  hf download \
+  "${HF_DOWNLOAD}" download \
     Comfy-Org/Wan_2.2_ComfyUI_Repackaged \
     split_files/diffusion_models/wan2.2_t2v_high_noise_14B_fp16.safetensors \
     --local-dir models/diffusion_models
 
 start_download diffusion_low_noise \
-  hf download \
+  "${HF_DOWNLOAD}" download \
     Comfy-Org/Wan_2.2_ComfyUI_Repackaged \
     split_files/diffusion_models/wan2.2_t2v_low_noise_14B_fp16.safetensors \
     --local-dir models/diffusion_models
 
 start_download diffusion_high_noise_i2v \
-  hf download \
+  "${HF_DOWNLOAD}" download \
     Comfy-Org/Wan_2.2_ComfyUI_Repackaged \
     split_files/diffusion_models/wan2.2_i2v_high_noise_14B_fp16.safetensors \
     --local-dir models/diffusion_models
 
 start_download diffusion_low_noise_i2v \
-  hf download \
+  "${HF_DOWNLOAD}" download \
     Comfy-Org/Wan_2.2_ComfyUI_Repackaged \
     split_files/diffusion_models/wan2.2_i2v_low_noise_14B_fp16.safetensors \
     --local-dir models/diffusion_models
@@ -125,51 +119,17 @@ echo "Model downloads running in background. PID files stored in ${DOWNLOAD_STAT
 # ---------- wait for critical tasks ----------
 wait_all
 
-WEBUI_PORT=7865
-cat <<'EOF' >/workspace/wan-training-webui/start_wan_webui.sh
-#!/bin/bash
-set -euo pipefail
-WEBUI_PORT="${WEBUI_PORT:-7865}"
-cd /workspace/wan-training-webui
-source /venv/main/bin/activate
-exec uvicorn webui.server:app --host 0.0.0.0 --port "${WEBUI_PORT}"
-EOF
-chmod +x /workspace/wan-training-webui/start_wan_webui.sh
+DEPLOYMENT_DIR=/workspace/wan-training-webui/deployment/vast
+
+sudo install -d -m 0755 /opt/supervisor-scripts /etc/supervisor/conf.d
+sudo install -m 0755 "${DEPLOYMENT_DIR}/start_wan_webui.sh" \
+  /opt/supervisor-scripts/start_wan_webui.sh
+sudo install -m 0644 "${DEPLOYMENT_DIR}/wan-training-webui.conf" \
+  /etc/supervisor/conf.d/wan-training-webui.conf
 
 if command -v supervisorctl >/dev/null 2>&1; then
-  sudo tee /etc/supervisor/conf.d/wan-training-webui.conf >/dev/null <<'EOF'
-[program:wan-training-webui]
-command=/bin/bash /workspace/wan-training-webui/start_wan_webui.sh
-directory=/workspace/wan-training-webui
-autostart=true
-autorestart=true
-stdout_logfile=/workspace/wan-training-webui.out.log
-stderr_logfile=/workspace/wan-training-webui.err.log
-stopasgroup=true
-killasgroup=true
-environment=PYTHONUNBUFFERED=1
-EOF
   sudo supervisorctl reread || true
   sudo supervisorctl update || true
-fi
-
-PORTAL_ENTRY="0.0.0.0:${WEBUI_PORT}:${WEBUI_PORT}:/:WAN Training UI"
-if [[ -n "${PORTAL_CONFIG:-}" ]]; then
-  case "${PORTAL_CONFIG}" in
-    *"${PORTAL_ENTRY}"*) ;;
-    *) PORTAL_CONFIG="${PORTAL_CONFIG}|${PORTAL_ENTRY}" ;;
-  esac
-else
-  PORTAL_CONFIG="${PORTAL_ENTRY}"
-fi
-export PORTAL_CONFIG
-
-sudo tee /etc/profile.d/wan_portal.sh >/dev/null <<EOF
-export PORTAL_CONFIG="${PORTAL_CONFIG}"
-EOF
-
-if command -v supervisorctl >/dev/null 2>&1; then
-  sudo supervisorctl restart instance_portal || true
 fi
 
 echo "✅ Setup complete."

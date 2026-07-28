@@ -3,3 +3,5 @@ run_low.log
 training_analysis/*
 training_analysis/
 .agents/*
+.hf-download-venv/
+.venv/

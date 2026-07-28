@@ -1,0 +1,13 @@
+fastapi
+matplotlib
+protobuf
+pydantic
+python-multipart
+rich
+six
+starlette
+tomli
+torch
+torchvision
+uvicorn[standard]
+vastai

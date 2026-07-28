@@ -51,11 +51,18 @@ fi
 source "$VENV_DIR/bin/activate"
 
 pip install -U pip
-pip install -U "huggingface_hub>=0.20.0" fastapi "uvicorn[standard]" python-multipart tomli torch torchvision matplotlib protobuf six
+pip install -r "$REPO_ROOT/requirements.txt"
+HF_DOWNLOAD_VENV="${REPO_ROOT}/.hf-download-venv"
+if [[ ! -d "$HF_DOWNLOAD_VENV" ]]; then
+  "$PYTHON_BIN" -m venv "$HF_DOWNLOAD_VENV"
+fi
+"$HF_DOWNLOAD_VENV/bin/pip" install \
+  -r "$REPO_ROOT/requirements-hf-download.txt"
+HF_DOWNLOAD="$HF_DOWNLOAD_VENV/bin/hf"
 
 (
   cd "$MUSUBI_DIR"
-  pip install -e .
+  pip install -e . "huggingface_hub==0.34.3"
 )
 
 mkdir -p "$MUSUBI_DIR/models/text_encoders" "$MUSUBI_DIR/models/vae" "$MUSUBI_DIR/models/diffusion_models"
@@ -80,7 +87,7 @@ download_if_missing() {
   fi
 
   echo "Downloading $file_path from $repo..."
-  hf download "$repo" "$file_path" --local-dir "$dest_dir"
+  "$HF_DOWNLOAD" download "$repo" "$file_path" --local-dir "$dest_dir"
 }
 
 download_if_missing "Wan-AI/Wan2.1-I2V-14B-720P" \
